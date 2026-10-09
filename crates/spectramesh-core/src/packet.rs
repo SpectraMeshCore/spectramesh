@@ -27,6 +27,9 @@
 //! | 16    | TTL: how many more hops the packet may take  |
 //! | 17..  | Payload                                      |
 //!
+//! **Body**, for **fragment frames**: a piece of a data frame's body that was
+//! too big for the hue. See [`fragment`](crate::fragment).
+//!
 //! **Trailer** (16 bytes): the sender's boot index (4), a counter (4) and a
 //! tag (8) over everything before it. See [`auth`](crate::auth).
 
@@ -52,6 +55,7 @@ pub const DATA_OVERHEAD: usize = HEADER_LEN + DATA_HEADER_LEN + TRAILER_LEN;
 pub enum FrameKind {
     Control = 1,
     Data = 2,
+    Fragment = 3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +112,25 @@ pub enum Body<'a> {
         header: DataHeader,
         payload: &'a [u8],
     },
+    /// A fragment header and chunk, not yet decoded.
+    Fragment(&'a [u8]),
+}
+
+impl<'a> Body<'a> {
+    /// Decodes the body of a data frame, whole or reassembled.
+    pub fn data(body: &'a [u8]) -> Result<Self> {
+        if body.len() < DATA_HEADER_LEN {
+            return Err(Error::Truncated);
+        }
+        Ok(Body::Data {
+            header: DataHeader {
+                origin: node_at(body, 0),
+                dst: node_at(body, 8),
+                ttl: body[16],
+            },
+            payload: &body[DATA_HEADER_LEN..],
+        })
+    }
 }
 
 /// A decoded frame. Nothing in it is authenticated until its tag is checked.
@@ -132,6 +155,7 @@ impl<'a> Frame<'a> {
         let kind = match frame[0] & 0x0f {
             1 => FrameKind::Control,
             2 => FrameKind::Data,
+            3 => FrameKind::Fragment,
             other => return Err(Error::UnknownFrameKind(other)),
         };
         let header = Header {
@@ -152,19 +176,8 @@ impl<'a> Frame<'a> {
         let body = &frame[HEADER_LEN..trailer_at];
         let body = match kind {
             FrameKind::Control => Body::Control(Tlvs(body)),
-            FrameKind::Data => {
-                if body.len() < DATA_HEADER_LEN {
-                    return Err(Error::Truncated);
-                }
-                Body::Data {
-                    header: DataHeader {
-                        origin: node_at(body, 0),
-                        dst: node_at(body, 8),
-                        ttl: body[16],
-                    },
-                    payload: &body[DATA_HEADER_LEN..],
-                }
-            }
+            FrameKind::Data => Body::data(body)?,
+            FrameKind::Fragment => Body::Fragment(body),
         };
         Ok(Frame {
             header,

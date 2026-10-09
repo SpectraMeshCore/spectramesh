@@ -22,12 +22,14 @@ use core::time::Duration;
 use crate::auth::{KeyRing, ReplayWindow, TRAILER_LEN};
 use crate::crypto::Random;
 use crate::error::{Error, Result};
+use crate::fragment::{self, FRAGMENT_HEADER_LEN, FragmentHeader, MAX_DATAGRAM, Reassembly};
 use crate::hue::{HueId, HueInfo};
 use crate::identity::{Identity, PublicIdentity};
 use crate::neighbor::{self, NeighborTable};
 use crate::node::NodeId;
 use crate::packet::{
-    Body, DATA_OVERHEAD, DataHeader, Frame, FrameKind, HEADER_LEN, Header, Tlv, Trailer,
+    Body, DATA_HEADER_LEN, DATA_OVERHEAD, DataHeader, Frame, FrameKind, HEADER_LEN, Header, Tlv,
+    Trailer,
 };
 use crate::routing::{self, INFINITY, Route, RouteEntry, RouteTable, SourceTable, seqno_newer};
 use crate::session::{Initiation, Session, TRANSPORT_OVERHEAD};
@@ -158,6 +160,9 @@ pub struct Router {
     initiations: BTreeMap<NodeId, Initiation>,
     /// Data held for each destination while a session is set up.
     waiting: BTreeMap<NodeId, VecDeque<Vec<u8>>>,
+    reassembly: Reassembly,
+    /// Numbers the datagrams this node fragments.
+    next_datagram: u16,
 }
 
 impl Router {
@@ -199,6 +204,8 @@ impl Router {
             current_sessions: BTreeMap::new(),
             initiations: BTreeMap::new(),
             waiting: BTreeMap::new(),
+            reassembly: Reassembly::default(),
+            next_datagram: 0,
         }
     }
 
@@ -290,7 +297,22 @@ impl Router {
         if !self.is_for_me(frame.header.next_hop) {
             return Ok(Some(sender));
         }
-        match frame.body {
+        let reassembled;
+        let body = match frame.body {
+            Body::Fragment(body) => {
+                let (header, chunk) = FragmentHeader::decode(body)?;
+                match self.reassembly.add(sender, hue, header, chunk, now)? {
+                    Some(whole) => {
+                        reassembled = whole;
+                        Body::data(&reassembled)?
+                    }
+                    None => return Ok(Some(sender)),
+                }
+            }
+            body => body,
+        };
+        match body {
+            Body::Fragment(_) => unreachable!("reassembled above"),
             Body::Control(tlvs) => {
                 for tlv in tlvs {
                     self.handle_tlv(sender, hue, tlv?, now);
@@ -415,16 +437,10 @@ impl Router {
     // TODO: mesh-wide broadcast, like a Meshtastic channel, with group keys.
     pub fn send(&mut self, dst: NodeId, payload: &[u8], now: Instant) -> Result<()> {
         if dst.is_broadcast() {
-            let len = DATA_OVERHEAD + payload.len();
-            let hues: Vec<HueId> = self
-                .hues
-                .iter()
-                .filter(|h| len <= usize::from(h.info.mtu))
-                .map(|h| h.info.id)
-                .collect();
-            if hues.is_empty() {
+            if DATA_HEADER_LEN + payload.len() > MAX_DATAGRAM {
                 return Err(Error::PayloadTooLarge);
             }
+            let hues: Vec<HueId> = self.hues.iter().map(|h| h.info.id).collect();
             let header = DataHeader {
                 origin: self.id,
                 dst,
@@ -436,21 +452,13 @@ impl Router {
             return Ok(());
         }
 
-        let route = *self.selected.get(&dst).ok_or(Error::NoRoute(dst))?;
-        if DATA_OVERHEAD + TRANSPORT_OVERHEAD + payload.len() > self.mtu(route.hue) {
+        if !self.selected.contains_key(&dst) {
+            return Err(Error::NoRoute(dst));
+        }
+        if payload.len() > MAX_PAYLOAD {
             return Err(Error::PayloadTooLarge);
         }
         self.send_unicast(dst, payload, now)
-    }
-
-    /// The largest payload [`send`](Self::send) accepts for `dst` along its
-    /// current route, or `None` without a route.
-    pub fn max_payload(&self, dst: NodeId) -> Option<usize> {
-        let route = self.selected.get(&dst)?;
-        Some(
-            self.mtu(route.hue)
-                .saturating_sub(DATA_OVERHEAD + TRANSPORT_OVERHEAD),
-        )
     }
 
     /// Runs timed work: expiry, route selection, hellos and updates.
@@ -461,6 +469,7 @@ impl Router {
         let hold = self.config.request_hold;
         self.recent_requests
             .retain(|_, &mut (_, sent)| now < sent + hold);
+        self.reassembly.expire(now);
         let peer_timeout = self.config.peer_timeout;
         self.peers
             .retain(|_, peer| now < peer.last_heard + peer_timeout);
@@ -789,19 +798,38 @@ impl Router {
         let Some(route) = self.selected.get(&header.dst).copied() else {
             return;
         };
-        if DATA_OVERHEAD + payload.len() > self.mtu(route.hue) {
-            return;
-        }
         header.ttl -= 1;
         self.queue_data(route.hue, route.next_hop, &header, payload);
     }
 
+    /// Sends a data frame, split into fragments if it's too big for the hue.
     fn queue_data(&mut self, hue: HueId, next_hop: NodeId, data: &DataHeader, payload: &[u8]) {
-        let mut frame = Vec::with_capacity(DATA_OVERHEAD + payload.len());
-        self.header(FrameKind::Data, next_hop).encode(&mut frame);
-        data.encode(&mut frame);
-        frame.extend_from_slice(payload);
-        self.transmit(hue, next_hop, frame);
+        let mtu = self.mtu(hue);
+        if DATA_OVERHEAD + payload.len() <= mtu {
+            let mut frame = Vec::with_capacity(DATA_OVERHEAD + payload.len());
+            self.header(FrameKind::Data, next_hop).encode(&mut frame);
+            data.encode(&mut frame);
+            frame.extend_from_slice(payload);
+            self.transmit(hue, next_hop, frame);
+            return;
+        }
+
+        let mut body = Vec::with_capacity(DATA_HEADER_LEN + payload.len());
+        data.encode(&mut body);
+        body.extend_from_slice(payload);
+        let chunk_len = mtu.saturating_sub(HEADER_LEN + FRAGMENT_HEADER_LEN + TRAILER_LEN);
+        if body.len() > MAX_DATAGRAM || chunk_len == 0 {
+            return;
+        }
+        self.next_datagram = self.next_datagram.wrapping_add(1);
+        for (header, chunk) in fragment::split(&body, self.next_datagram, chunk_len) {
+            let mut frame = Vec::with_capacity(mtu);
+            self.header(FrameKind::Fragment, next_hop)
+                .encode(&mut frame);
+            header.encode(&mut frame);
+            frame.extend_from_slice(chunk);
+            self.transmit(hue, next_hop, frame);
+        }
     }
 
     fn header(&self, kind: FrameKind, next_hop: NodeId) -> Header {
@@ -837,11 +865,15 @@ impl Router {
     }
 }
 
-/// The well-formed TLVs in a frame, or none for a data frame.
+/// The largest payload [`Router::send`] accepts for one destination:
+/// whatever fits in a reassembled data frame, encrypted.
+pub const MAX_PAYLOAD: usize = MAX_DATAGRAM - DATA_HEADER_LEN - TRANSPORT_OVERHEAD;
+
+/// The well-formed TLVs in a frame, or none for a data or fragment frame.
 fn control_tlvs<'a>(frame: &Frame<'a>) -> impl Iterator<Item = Tlv> + 'a {
     let tlvs = match &frame.body {
         Body::Control(tlvs) => Some(tlvs.clone()),
-        Body::Data { .. } => None,
+        Body::Data { .. } | Body::Fragment(_) => None,
     };
     tlvs.into_iter().flatten().filter_map(Result::ok)
 }
@@ -1133,7 +1165,7 @@ mod tests {
         );
         let now = Instant::default();
         assert_eq!(
-            a.send(NodeId::BROADCAST, &[0; 300], now),
+            a.send(NodeId::BROADCAST, &[0; MAX_DATAGRAM], now),
             Err(Error::PayloadTooLarge)
         );
         assert_eq!(
@@ -1372,6 +1404,57 @@ mod tests {
         routers[0].send(c, b"after", now).unwrap();
         simulate(&mut routers, &links, now, secs(2));
         assert_eq!(deliveries(&mut routers[2]), [b"after".to_vec()]);
+    }
+
+    #[test]
+    fn large_payloads_cross_small_hues_in_fragments() {
+        // Ethernet, then two 255-byte sub-GHz hops: A - B = C = D.
+        let mut routers = [
+            router(1, &[ethernet()]),
+            router(2, &[ethernet(), sub_ghz()]),
+            router(3, &[sub_ghz()]),
+            router(4, &[sub_ghz()]),
+        ];
+        let links = [(0, 1, ETHERNET), (1, 2, SUB_GHZ), (2, 3, SUB_GHZ)];
+        let now = simulate(&mut routers, &links, Instant::default(), secs(40));
+        let d = routers[3].id();
+
+        let big: Vec<u8> = (0..1300).map(|i| i as u8).collect();
+        routers[0].send(d, &big, now).unwrap();
+        // The relays on the sub-GHz side send it as fragments that fit.
+        let relayed = simulate_watching(&mut routers, &links, now, secs(3), 2);
+        assert!(relayed.iter().all(|frame| frame.len() <= 255));
+        assert!(relayed.len() >= 7, "{} frames", relayed.len());
+        assert_eq!(deliveries(&mut routers[3]), [big]);
+
+        assert_eq!(
+            routers[0].send(d, &[0; MAX_PAYLOAD + 1], now),
+            Err(Error::PayloadTooLarge)
+        );
+    }
+
+    #[test]
+    fn incomplete_datagrams_are_dropped() {
+        let (mut routers, links) = line(2);
+        let now = simulate(&mut routers, &links, Instant::default(), secs(10));
+        // A small hue, so the broadcast below is fragmented.
+        for router in &mut routers {
+            router.add_hue(HueInfo { mtu: 100, ..wifi() });
+        }
+        routers[0].send(NodeId::BROADCAST, &[7; 500], now).unwrap();
+        let mut frames = Vec::new();
+        while let Some(tx) = routers[0].poll_transmit() {
+            frames.push(tx.frame);
+        }
+        assert!(frames.len() > 2);
+        // Every fragment but one arrives.
+        for frame in &frames[1..] {
+            routers[1].handle_frame(WIFI, frame, now).unwrap();
+        }
+        assert!(deliveries(&mut routers[1]).is_empty());
+        assert_eq!(routers[1].reassembly.len(), 1);
+        routers[1].poll(now + fragment::REASSEMBLY_TIMEOUT);
+        assert!(routers[1].reassembly.is_empty());
     }
 
     #[test]

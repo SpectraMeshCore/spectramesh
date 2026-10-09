@@ -17,7 +17,7 @@ use std::path::Path;
 
 use spectramesh_core::packet::DATA_OVERHEAD;
 use spectramesh_core::{
-    Config as RouterConfig, HueId, HueInfo, MeshKey, Router, TRANSPORT_OVERHEAD,
+    Config as RouterConfig, HueId, HueInfo, MAX_PAYLOAD, MeshKey, Router, TRANSPORT_OVERHEAD,
 };
 
 use crate::config::{Command, Config, USAGE};
@@ -148,9 +148,12 @@ fn run(config: Config) -> io::Error {
         });
     }
 
-    // IPv6 packets must fit the smallest hue once wrapped for the mesh.
+    // Packets that fit every hue whole avoid fragmentation. Smaller hues
+    // fragment, which still carries IPv6's minimum.
     let smallest_mtu = infos.iter().map(|h| usize::from(h.mtu)).min().unwrap_or(0);
-    let ip_mtu = smallest_mtu.saturating_sub(DATA_OVERHEAD + TRANSPORT_OVERHEAD);
+    let ip_mtu = smallest_mtu
+        .saturating_sub(DATA_OVERHEAD + TRANSPORT_OVERHEAD)
+        .clamp(IPV6_MIN_MTU, MAX_PAYLOAD);
 
     let node_id = identity.node_id();
     let mut router = Router::new(identity, mesh_keys, RouterConfig::default(), seed);
@@ -165,14 +168,6 @@ fn run(config: Config) -> io::Error {
 
     let tun = match &config.tun {
         None => None,
-        Some(_) if ip_mtu < IPV6_MIN_MTU => {
-            return io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "IPv6 needs {IPV6_MIN_MTU}-byte packets, but the smallest hue only fits {ip_mtu}"
-                ),
-            );
-        }
         Some(name) => match Tun::create(name, prefix.address(node_id), ip_mtu) {
             Ok(tun) => {
                 info!(

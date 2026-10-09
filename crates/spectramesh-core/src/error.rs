@@ -40,6 +40,8 @@ pub enum Error {
     /// An end-to-end message for a session this node doesn't have, perhaps
     /// because it expired or the node restarted.
     NoSession,
+    /// A fragment that doesn't fit its datagram, or would exceed the limits.
+    BadFragment,
 }
 
 impl fmt::Display for Error {
@@ -59,6 +61,7 @@ impl fmt::Display for Error {
             Error::BadHandshake => f.write_str("handshake failed or doesn't match its node ID"),
             Error::BadCiphertext => f.write_str("end-to-end message didn't decrypt"),
             Error::NoSession => f.write_str("no session for end-to-end message"),
+            Error::BadFragment => f.write_str("fragment doesn't fit its datagram"),
         }
     }
 }

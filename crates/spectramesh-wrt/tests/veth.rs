@@ -1,16 +1,16 @@
 //! Runs real daemons over virtual Ethernet devices with `scripts/veth-demo.sh`.
 //!
-//! Ignored by default: it takes about 15 seconds and needs unprivileged user
+//! Ignored by default: it takes about 18 seconds and needs unprivileged user
 //! namespaces. Run it with `cargo test -p spectramesh-wrt -- --ignored`.
 
 use std::collections::HashMap;
 use std::process::Command;
 
 #[test]
-#[ignore = "takes 15 s and needs unprivileged user namespaces"]
+#[ignore = "takes 18 s and needs unprivileged user namespaces"]
 fn daemons_carry_ipv6_through_each_other_and_keep_outsiders_out() {
     let output = Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/veth-demo.sh"))
-        .arg("15")
+        .arg("18")
         .env("SPECTRAMESHD", env!("CARGO_BIN_EXE_spectrameshd"))
         .output()
         .expect("failed to run veth-demo.sh");
@@ -43,9 +43,14 @@ fn daemons_carry_ipv6_through_each_other_and_keep_outsiders_out() {
     assert!(has(&via_2("node 1", "node 3", "a0")), "{log}");
     assert!(has(&via_2("node 3", "node 1", "c1")), "{log}");
 
-    // IPv6 crosses the mesh, end to end through node 2.
+    // IPv6 crosses the mesh, end to end through node 2, and large packets
+    // are fragmented across the small node 2 - node 3 link.
     assert!(
         has("[node 1 ping] 3 packets transmitted, 3 received"),
+        "{log}"
+    );
+    assert!(
+        has("[node 1 big ping] 3 packets transmitted, 3 received"),
         "{log}"
     );
 
