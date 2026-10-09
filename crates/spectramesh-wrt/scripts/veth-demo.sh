@@ -10,8 +10,9 @@
 # per frame. Each member node carries IPv6 through a TUN device, and node 1
 # pings node 3's mesh address with small and 1,200-byte packets; the packets
 # cross node 2 encrypted end to end, and the large ones are fragmented on the
-# small link. Node 4 has a different mesh key, so node 2 drops everything it
-# sends.
+# small link. Node 1 also pings an address no node has, which the mesh
+# answers with "no route". Node 4 has a different mesh key, so node 2 drops
+# everything it sends.
 #
 # Needs no root, only unprivileged user namespaces (enabled on most Linux
 # distributions).
@@ -31,11 +32,16 @@ dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
 (umask 077 && "$bin" --generate-mesh-key >"$dir/mesh.key" && "$bin" --generate-mesh-key >"$dir/other.key")
 # Create node 3's identity now, so node 1 knows which address to ping.
-target=$("$bin" --node-info --identity "$dir/node 3.id" --mesh-key-file "$dir/mesh.key" |
-	sed -n 's/^IPv6 address: *//p')
+address() {
+	"$bin" --node-info --identity "$dir/$1.id" --mesh-key-file "$dir/mesh.key" |
+		sed -n 's/^IPv6 address: *//p'
+}
+target=$(address "node 3")
+# An address in the mesh that no running node has.
+nowhere=$(address nobody)
 
 unshare --user --map-root-user --net sh -eu -c '
-	bin=$1 dir=$2 seconds=$3 target=$4
+	bin=$1 dir=$2 seconds=$3 target=$4 nowhere=$5
 
 	# Starts a node in a network namespace of its own. It waits for its
 	# cables, then runs the daemon, and pings `ping` if that is set.
@@ -43,8 +49,8 @@ unshare --user --map-root-user --net sh -eu -c '
 		name=$1 key=$2 ping=$3
 		shift 3
 		unshare --net --mount sh -eu -c "
-			name=\$1 bin=\$2 dir=\$3 key=\$4 seconds=\$5 ping=\$6
-			shift 6
+			name=\$1 bin=\$2 dir=\$3 key=\$4 seconds=\$5 ping=\$6 nowhere=\$7
+			shift 7
 			mount -t sysfs sysfs /sys
 			ip link set lo up
 			hues=
@@ -60,9 +66,10 @@ unshare --user --map-root-user --net sh -eu -c '
 				sleep \$((seconds - 9))
 				ping -6 -c 3 -W 2 \$ping 2>&1 | sed \"s/^/[\$name ping] /\" || true
 				ping -6 -c 3 -W 2 -s 1200 \$ping 2>&1 | sed \"s/^/[\$name big ping] /\" || true
+				ping -6 -c 1 -W 2 \$nowhere 2>&1 | sed \"s/^/[\$name nowhere ping] /\" || true
 			fi
 			wait
-		" node "$name" "$bin" "$dir" "$key" "$seconds" "$ping" "$@" &
+		" node "$name" "$bin" "$dir" "$key" "$seconds" "$ping" "$nowhere" "$@" &
 		pids="${pids:+$pids,}$!"
 		eval "pid_$(echo "$name" | tr -d " ")=$!"
 	}
@@ -92,4 +99,4 @@ unshare --user --map-root-user --net sh -eu -c '
 	pkill -x -P "$pids" spectrameshd || true
 	wait
 	pids=
-' demo "$bin" "$dir" "$seconds" "$target"
+' demo "$bin" "$dir" "$seconds" "$target" "$nowhere"

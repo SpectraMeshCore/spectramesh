@@ -53,6 +53,8 @@ fn daemons_carry_ipv6_through_each_other_and_keep_outsiders_out() {
         has("[node 1 big ping] 3 packets transmitted, 3 received"),
         "{log}"
     );
+    // An address no node has gets an immediate ICMPv6 error.
+    assert!(has("Destination unreachable: No route"), "{log}");
 
     // The outsider is dropped by node 2 and learns nothing.
     assert!(

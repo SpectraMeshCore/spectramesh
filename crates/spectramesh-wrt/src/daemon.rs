@@ -16,6 +16,7 @@ use std::time::Duration;
 use log::{debug, error, info, warn};
 use spectramesh_core::{Error, HueId, Instant, NodeId, Router};
 
+use crate::icmp;
 use crate::link::{BROADCAST_MAC, EthernetSocket, Mac};
 use crate::tun::{Prefix, Tun, addresses};
 
@@ -76,6 +77,7 @@ pub fn run(
     // TODO: forget addresses of neighbors the router has dropped.
     let mut macs: BTreeMap<(HueId, NodeId), Mac> = BTreeMap::new();
     let mut next_report = now() + report_interval;
+    let mut last_icmp_error = Instant::default();
 
     loop {
         let wakeup = router.next_wakeup().min(next_report);
@@ -97,8 +99,16 @@ pub fn run(
                 Err(err) => debug!("dropped a frame on hue {}: {err}", hue.0),
             },
             Ok(Event::Packet(packet)) => {
-                if let Some((_, prefix, own)) = &tun {
-                    send_packet(&mut router, *prefix, own, &packet, now());
+                if let Some((device, prefix, own)) = &mut tun {
+                    let error = send_packet(&mut router, *prefix, own, &packet, now());
+                    // RFC 4443 asks for error messages to be rate-limited.
+                    let allowed = now() >= last_icmp_error + ICMP_ERROR_INTERVAL;
+                    if let Some(error) = error.filter(|_| allowed) {
+                        last_icmp_error = now();
+                        if let Err(err) = device.write_packet(&error) {
+                            warn!("writing to {} failed: {err}", device.name);
+                        }
+                    }
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -148,22 +158,32 @@ pub fn run(
     }
 }
 
+/// The shortest gap between ICMPv6 errors: at most 10 a second.
+const ICMP_ERROR_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Sends an IPv6 packet from this host to the node its destination names.
-fn send_packet(router: &mut Router, prefix: Prefix, own: &[u8; 16], packet: &[u8], now: Instant) {
+/// Returns an ICMPv6 error for the host if the mesh has no route there.
+fn send_packet(
+    router: &mut Router,
+    prefix: Prefix,
+    own: &[u8; 16],
+    packet: &[u8],
+    now: Instant,
+) -> Option<Vec<u8>> {
     // Only this node's own mesh address may send into the mesh; the kernel
     // also routes things like link-local multicast here, which stay local.
-    let Some((src, dst)) = addresses(packet) else {
-        return;
-    };
-    let Some(node) = prefix.node(&dst) else {
-        return;
-    };
+    let (src, dst) = addresses(packet)?;
+    let node = prefix.node(&dst)?;
     if &src != own || node == router.id() {
-        return;
+        return None;
     }
-    if let Err(err) = router.send(node, packet, now) {
-        // TODO: answer with ICMPv6 unreachable or packet-too-big messages.
-        debug!("dropped a {}-byte packet for {node}: {err}", packet.len());
+    match router.send(node, packet, now) {
+        Ok(()) => None,
+        Err(Error::NoRoute(_)) => icmp::no_route(own, packet),
+        Err(err) => {
+            debug!("dropped a {}-byte packet for {node}: {err}", packet.len());
+            None
+        }
     }
 }
 

@@ -3,6 +3,7 @@
 
 mod config;
 mod daemon;
+mod icmp;
 mod keys;
 mod link;
 mod logger;
