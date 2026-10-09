@@ -34,6 +34,7 @@
 extern crate alloc;
 
 pub mod auth;
+pub mod channel;
 mod crypto;
 pub mod error;
 pub mod fragment;
@@ -47,7 +48,8 @@ pub mod routing;
 pub mod session;
 pub mod time;
 
-pub use auth::{KeyRing, MeshKey, MeshKeyError};
+pub use auth::{KeyRing, KeyTextError, MeshKey};
+pub use channel::{ChannelId, ChannelKey};
 pub use error::{Error, Result};
 pub use hue::{HueId, HueInfo, HueKind};
 pub use identity::{Identity, PublicIdentity};

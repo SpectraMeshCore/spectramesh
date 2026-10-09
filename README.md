@@ -26,7 +26,7 @@ Routes pick the fastest hue that reaches, and can mix hues hop by hop. Nodes cab
 
 Early development. `spectramesh-core` routes between simulated nodes in its tests, `spectramesh-esp` runs it on ESP32-C6 boards over ESP-NOW, and `spectramesh-wrt` runs it on Linux over Ethernet, fiber and Wi-Fi mesh devices.
 
-Every frame is authenticated with a shared mesh key, replays are rejected, node IDs come from each node's own keys, and unicast data is encrypted end to end. On Linux, the daemon carries IPv6 over the mesh. See the [security design](docs/design/wire-format-v2.md).
+Every frame is authenticated with a shared mesh key, replays are rejected, node IDs come from each node's own keys, unicast data is encrypted end to end, and members can't hijack each other's routes. Channels carry encrypted group messages across the mesh, and data too big for a hue is fragmented. On Linux, the daemon carries IPv6 over the mesh. See the [security design](docs/design/wire-format-v2.md).
 
 ```
 cargo test                                         # core and daemon tests

@@ -42,6 +42,8 @@ pub enum Error {
     NoSession,
     /// A fragment that doesn't fit its datagram, or would exceed the limits.
     BadFragment,
+    /// A channel this node hasn't joined.
+    UnknownChannel,
 }
 
 impl fmt::Display for Error {
@@ -62,6 +64,7 @@ impl fmt::Display for Error {
             Error::BadCiphertext => f.write_str("end-to-end message didn't decrypt"),
             Error::NoSession => f.write_str("no session for end-to-end message"),
             Error::BadFragment => f.write_str("fragment doesn't fit its datagram"),
+            Error::UnknownChannel => f.write_str("not a member of that channel"),
         }
     }
 }

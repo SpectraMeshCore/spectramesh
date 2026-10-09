@@ -32,8 +32,8 @@ pub const TAG_LEN: usize = 8;
 /// 2-byte checksum, so typos are caught instead of producing a different key.
 pub struct MeshKey([u8; 32]);
 
-const TEXT_PREFIX: &str = "smk1-";
-const BASE32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+const MESH_KEY_PREFIX: &str = "smk1-";
+const MESH_KEY_CHECKSUM: &str = "SpectraMesh mesh key checksum v1";
 
 impl MeshKey {
     /// Use 32 bytes from a cryptographic random number generator.
@@ -63,72 +63,15 @@ impl MeshKey {
         crypto::derive_key(&self.0, "SpectraMesh link v1")
     }
 
-    fn checksum(key: &[u8; 32]) -> [u8; 2] {
-        let hash = crypto::hash("SpectraMesh mesh key checksum v1", &[key]);
-        [hash[0], hash[1]]
-    }
-
     /// The key as text, for configuration files. Treat it like a password.
     pub fn to_text(&self) -> String {
-        let mut bytes = Vec::with_capacity(34);
-        bytes.extend_from_slice(&self.0);
-        bytes.extend_from_slice(&Self::checksum(&self.0));
-        let mut text = String::from(TEXT_PREFIX);
-        // 34 bytes is 272 bits: 54 full 5-bit groups plus 2 bits.
-        let (mut acc, mut bits) = (0u32, 0);
-        for byte in bytes {
-            acc = (acc << 8) | u32::from(byte);
-            bits += 8;
-            while bits >= 5 {
-                bits -= 5;
-                text.push(char::from(BASE32[((acc >> bits) & 31) as usize]));
-            }
-        }
-        if bits > 0 {
-            text.push(char::from(BASE32[((acc << (5 - bits)) & 31) as usize]));
-        }
-        acc.zeroize();
-        text
+        key_to_text(MESH_KEY_PREFIX, MESH_KEY_CHECKSUM, &self.0)
     }
 
     /// Parses text from [`to_text`](Self::to_text). Case and surrounding
     /// whitespace don't matter.
-    pub fn from_text(text: &str) -> Result<Self, MeshKeyError> {
-        let text = text.trim();
-        let body = text
-            .get(..TEXT_PREFIX.len())
-            .filter(|prefix| prefix.eq_ignore_ascii_case(TEXT_PREFIX))
-            .map(|_| &text[TEXT_PREFIX.len()..])
-            .ok_or(MeshKeyError::Format)?;
-        if body.len() != 55 {
-            return Err(MeshKeyError::Format);
-        }
-        let mut bytes = [0u8; 34];
-        let (mut acc, mut bits, mut out) = (0u32, 0, 0);
-        for c in body.bytes() {
-            let value = BASE32
-                .iter()
-                .position(|&b| b == c.to_ascii_lowercase())
-                .ok_or(MeshKeyError::Format)?;
-            acc = (acc << 5) | value as u32;
-            bits += 5;
-            if bits >= 8 {
-                bits -= 8;
-                bytes[out] = (acc >> bits) as u8;
-                out += 1;
-            }
-        }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&bytes[..32]);
-        let valid = bytes[32..] == Self::checksum(&key);
-        bytes.zeroize();
-        acc.zeroize();
-        if valid {
-            Ok(MeshKey(key))
-        } else {
-            key.zeroize();
-            Err(MeshKeyError::Checksum)
-        }
+    pub fn from_text(text: &str) -> Result<Self, KeyTextError> {
+        key_from_text(MESH_KEY_PREFIX, MESH_KEY_CHECKSUM, text).map(MeshKey)
     }
 }
 
@@ -145,24 +88,105 @@ impl fmt::Debug for MeshKey {
     }
 }
 
+const BASE32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+
+/// A 32-byte key as text: `prefix`, then 55 base32 characters encoding the
+/// key and a 2-byte checksum keyed with `checksum_label`.
+pub(crate) fn key_to_text(prefix: &str, checksum_label: &str, key: &[u8; 32]) -> String {
+    let mut bytes = Vec::with_capacity(34);
+    bytes.extend_from_slice(key);
+    bytes.extend_from_slice(&checksum(checksum_label, key));
+    let mut text = String::from(prefix);
+    // 34 bytes is 272 bits: 54 full 5-bit groups plus 2 bits.
+    let (mut acc, mut bits) = (0u32, 0);
+    for &byte in &bytes {
+        acc = (acc << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            text.push(char::from(BASE32[((acc >> bits) & 31) as usize]));
+        }
+    }
+    if bits > 0 {
+        text.push(char::from(BASE32[((acc << (5 - bits)) & 31) as usize]));
+    }
+    bytes.zeroize();
+    acc.zeroize();
+    text
+}
+
+/// Parses text from [`key_to_text`]. Case and surrounding whitespace don't matter.
+pub(crate) fn key_from_text(
+    prefix: &'static str,
+    checksum_label: &str,
+    text: &str,
+) -> Result<[u8; 32], KeyTextError> {
+    let format = KeyTextError::Format { prefix };
+    let text = text.trim();
+    let body = text
+        .get(..prefix.len())
+        .filter(|found| found.eq_ignore_ascii_case(prefix))
+        .map(|_| &text[prefix.len()..])
+        .ok_or(format)?;
+    if body.len() != 55 {
+        return Err(format);
+    }
+    let mut bytes = [0u8; 34];
+    let (mut acc, mut bits, mut out) = (0u32, 0, 0);
+    for c in body.bytes() {
+        let value = BASE32
+            .iter()
+            .position(|&b| b == c.to_ascii_lowercase())
+            .ok_or(format)?;
+        acc = (acc << 5) | value as u32;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            bytes[out] = (acc >> bits) as u8;
+            out += 1;
+        }
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes[..32]);
+    let valid = bytes[32..] == checksum(checksum_label, &key);
+    bytes.zeroize();
+    acc.zeroize();
+    if valid {
+        Ok(key)
+    } else {
+        key.zeroize();
+        Err(KeyTextError::Checksum)
+    }
+}
+
+fn checksum(label: &str, key: &[u8; 32]) -> [u8; 2] {
+    let hash = crypto::hash(label, &[key]);
+    [hash[0], hash[1]]
+}
+
+/// Why a mesh or channel key's text didn't parse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MeshKeyError {
-    /// Not `smk1-` followed by 55 base32 characters.
-    Format,
+pub enum KeyTextError {
+    /// Not `prefix` followed by 55 base32 characters.
+    Format { prefix: &'static str },
     /// The checksum doesn't match, probably because of a typo.
     Checksum,
 }
 
-impl fmt::Display for MeshKeyError {
+impl fmt::Display for KeyTextError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            MeshKeyError::Format => "a mesh key is \"smk1-\" followed by 55 letters and digits",
-            MeshKeyError::Checksum => "the mesh key's checksum doesn't match; check for typos",
-        })
+        match self {
+            KeyTextError::Format { prefix } => {
+                write!(f, "expected \"{prefix}\" followed by 55 letters and digits")
+            }
+            KeyTextError::Checksum => {
+                f.write_str("the key's checksum doesn't match; check for typos")
+            }
+        }
     }
 }
 
-impl core::error::Error for MeshKeyError {}
+impl core::error::Error for KeyTextError {}
 
 /// The mesh keys a node accepts, and the one it sends with.
 ///
@@ -188,6 +212,11 @@ impl KeyRing {
     /// The ID frames are sent with.
     pub fn current_id(&self) -> u8 {
         self.keys[0].0
+    }
+
+    /// The IDs of every accepted key, the current one first.
+    pub fn ids(&self) -> impl Iterator<Item = u8> + '_ {
+        self.keys.iter().map(|(id, _)| *id)
     }
 
     /// Tags `signed`, the frame so far, with the current key.
@@ -296,15 +325,15 @@ mod tests {
         let typo = String::from_utf8(typo).unwrap();
         assert_eq!(
             MeshKey::from_text(&typo).unwrap_err(),
-            MeshKeyError::Checksum
+            KeyTextError::Checksum
         );
         assert_eq!(
             MeshKey::from_text(&text[..40]).unwrap_err(),
-            MeshKeyError::Format
+            KeyTextError::Format { prefix: "smk1-" }
         );
         assert_eq!(
             MeshKey::from_text("smk1-!!!").unwrap_err(),
-            MeshKeyError::Format
+            KeyTextError::Format { prefix: "smk1-" }
         );
     }
 

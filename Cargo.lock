@@ -276,6 +276,7 @@ name = "spectramesh-core"
 version = "0.1.0"
 dependencies = [
  "blake2",
+ "chacha20poly1305",
  "ed25519-dalek",
  "snow",
  "x25519-dalek",

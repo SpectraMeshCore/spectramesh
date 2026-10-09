@@ -13,6 +13,7 @@
 //! index has passed a challenge. Unicast data is also encrypted end to end
 //! ([`session`](crate::session)).
 
+mod channels;
 mod e2e;
 mod proofs;
 
@@ -21,6 +22,7 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use crate::auth::{KeyRing, ReplayWindow, TRAILER_LEN};
+use crate::channel::{self, ChannelId, ChannelKey};
 use crate::crypto::Random;
 use crate::error::{Error, Result};
 use crate::fragment::{self, FRAGMENT_HEADER_LEN, FragmentHeader, MAX_DATAGRAM, Reassembly};
@@ -84,9 +86,11 @@ pub struct Delivery {
     pub payload: Vec<u8>,
     /// The sender's public keys, as proven by the end-to-end handshake. To be
     /// sure who sent the data, compare their [hash](PublicIdentity::hash)
-    /// with the one you expect. `None` for broadcasts to neighbors, which
-    /// only the mesh key protects.
+    /// with the one you expect. `None` for broadcasts, which the mesh or
+    /// channel key protects but don't prove who sent them.
     pub sender_keys: Option<PublicIdentity>,
+    /// The channel a channel message arrived on.
+    pub channel: Option<ChannelId>,
 }
 
 /// What this node knows about a neighbor's frames on one hue, once its boot
@@ -171,6 +175,9 @@ pub struct Router {
     reassembly: Reassembly,
     /// Numbers the datagrams this node fragments.
     next_datagram: u16,
+    channels: Vec<ChannelKey>,
+    /// Channel messages seen recently, by (origin, message ID), and when.
+    seen_broadcasts: BTreeMap<(NodeId, u32), Instant>,
 }
 
 impl Router {
@@ -219,6 +226,8 @@ impl Router {
             waiting: BTreeMap::new(),
             reassembly: Reassembly::default(),
             next_datagram: 0,
+            channels: Vec::new(),
+            seen_broadcasts: BTreeMap::new(),
         }
     }
 
@@ -337,11 +346,7 @@ impl Router {
                     return Ok(Some(sender));
                 }
                 if header.dst.is_broadcast() {
-                    self.deliveries.push_back(Delivery {
-                        src: header.origin,
-                        payload: payload.to_vec(),
-                        sender_keys: None,
-                    });
+                    self.handle_broadcast(header, payload, now)?;
                 } else if header.dst == self.id {
                     self.handle_end_to_end(header.origin, payload, now)?;
                 } else {
@@ -446,24 +451,23 @@ impl Router {
     ///
     /// The first time, this node finds `dst`'s keys and sets up a session,
     /// holding the payload meanwhile, so it arrives a round trip or two later.
-    /// Sending to [`NodeId::BROADCAST`] reaches direct neighbors on every hue
-    /// the payload fits on, protected only by the mesh key.
-    //
-    // TODO: mesh-wide broadcast, like a Meshtastic channel, with group keys.
+    /// Sending to [`NodeId::BROADCAST`] reaches direct neighbors on every
+    /// hue, protected only by the mesh key. To reach a group across the whole
+    /// mesh, use a channel ([`send_to_channel`](Self::send_to_channel)).
     pub fn send(&mut self, dst: NodeId, payload: &[u8], now: Instant) -> Result<()> {
         if dst.is_broadcast() {
-            if DATA_HEADER_LEN + payload.len() > MAX_DATAGRAM {
+            if DATA_HEADER_LEN + 1 + payload.len() > MAX_DATAGRAM {
                 return Err(Error::PayloadTooLarge);
             }
-            let hues: Vec<HueId> = self.hues.iter().map(|h| h.info.id).collect();
+            let mut message = Vec::with_capacity(1 + payload.len());
+            message.push(channel::NEIGHBORS);
+            message.extend_from_slice(payload);
             let header = DataHeader {
                 origin: self.id,
                 dst,
                 ttl: 1,
             };
-            for hue in hues {
-                self.queue_data(hue, NodeId::BROADCAST, &header, payload);
-            }
+            self.flood(&header, &message);
             return Ok(());
         }
 
@@ -486,6 +490,7 @@ impl Router {
             .retain(|_, &mut (_, sent)| now < sent + hold);
         self.reassembly.expire(now);
         self.expire_proofs(now);
+        self.expire_broadcasts(now);
         let peer_timeout = self.config.peer_timeout;
         self.peers
             .retain(|_, peer| now < peer.last_heard + peer_timeout);
@@ -1036,6 +1041,7 @@ mod tests {
                 src: routers[0].id(),
                 payload: b"hello across two hues".to_vec(),
                 sender_keys: Some(*routers[0].public_identity()),
+                channel: None,
             })
         );
     }
@@ -1528,6 +1534,89 @@ mod tests {
         assert_eq!(route.next_hop, b);
         assert!(!seqno_newer(route.seqno, c_seqno));
         assert!(!routers[0].is_proven(c, forged));
+    }
+
+    fn deliveries_with_channel(router: &mut Router) -> Vec<(Vec<u8>, Option<ChannelId>)> {
+        core::iter::from_fn(|| router.poll_delivery())
+            .map(|d| (d.payload, d.channel))
+            .collect()
+    }
+
+    #[test]
+    fn channel_messages_reach_every_member_once() {
+        // A square with a tail, so copies arrive by several paths:
+        // A - B - C - D - A, and C - E. A, C and E are on the channel.
+        let mut routers: Vec<Router> = (1..=5).map(|id| router(id, &[wifi()])).collect();
+        let links = [
+            (0, 1, WIFI),
+            (1, 2, WIFI),
+            (2, 3, WIFI),
+            (3, 0, WIFI),
+            (2, 4, WIFI),
+        ];
+        let now = simulate(&mut routers, &links, Instant::default(), secs(20));
+        let key = || ChannelKey::from_bytes([0x5c; 32]);
+        let id = key().id();
+        for member in [0, 2, 4] {
+            routers[member].join_channel(key());
+        }
+
+        routers[0]
+            .send_to_channel(id, b"hello channel", now)
+            .unwrap();
+        simulate(&mut routers, &links, now, secs(2));
+        for member in [2, 4] {
+            assert_eq!(
+                deliveries_with_channel(&mut routers[member]),
+                [(b"hello channel".to_vec(), Some(id))],
+                "member {member}"
+            );
+        }
+        for other in [0, 1, 3] {
+            assert!(deliveries(&mut routers[other]).is_empty(), "router {other}");
+        }
+    }
+
+    #[test]
+    fn non_members_relay_channel_messages_they_cannot_read() {
+        let (mut routers, links) = line(3);
+        let now = simulate(&mut routers, &links, Instant::default(), secs(20));
+        let ours = ChannelKey::from_bytes([1; 32]);
+        let id = ours.id();
+        routers[0].join_channel(ours);
+        routers[1].join_channel(ChannelKey::from_bytes([2; 32]));
+        routers[2].join_channel(ChannelKey::from_bytes([1; 32]));
+
+        routers[0].send_to_channel(id, b"pass it on", now).unwrap();
+        let relayed = simulate_watching(&mut routers, &links, now, secs(2), 1);
+        assert!(!relayed.is_empty());
+        assert!(
+            relayed
+                .iter()
+                .all(|f| !f.windows(7).any(|w| w == b"pass it"))
+        );
+        assert!(deliveries(&mut routers[1]).is_empty());
+        assert_eq!(deliveries(&mut routers[2]), [b"pass it on".to_vec()]);
+
+        assert_eq!(
+            routers[1].send_to_channel(id, b"not mine", now),
+            Err(Error::UnknownChannel)
+        );
+    }
+
+    #[test]
+    fn neighbor_broadcasts_stay_with_neighbors() {
+        let (mut routers, links) = line(3);
+        let now = simulate(&mut routers, &links, Instant::default(), secs(20));
+        routers[0]
+            .send(NodeId::BROADCAST, b"just next door", now)
+            .unwrap();
+        simulate(&mut routers, &links, now, secs(2));
+        assert_eq!(
+            deliveries_with_channel(&mut routers[1]),
+            [(b"just next door".to_vec(), None)]
+        );
+        assert!(deliveries(&mut routers[2]).is_empty());
     }
 
     #[test]

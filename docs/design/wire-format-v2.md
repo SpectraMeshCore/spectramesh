@@ -1,6 +1,6 @@
 # Wire format v2 and security
 
-**Status:** Accepted, with the recommended answer to every open question. Phases 1 and 2 are implemented; phase 3 hasn't started.
+**Status:** Accepted, with the recommended answer to every open question. All three phases are implemented.
 
 SpectraMesh v1 has no security: anyone in radio range can read traffic, inject routes, and impersonate any node. Its 4-byte node IDs can't be tied to keys either. This document proposes the second version of the wire format, built around security, before anything is deployed and while the format is still cheap to change.
 
@@ -121,7 +121,7 @@ This avoids writing counters to flash, which would wear it out on ESP32.
 
 Each frame carries a 1-byte **key ID**. During a rotation, nodes accept both the old and the new key, and send with the new one once it's configured. To remove a member, distribute a new key to everyone else and retire the old ID.
 
-Distributing keys is manual for now: a config option on Linux, and serial or provisioning on ESP32.
+Distributing keys is manual for now: a config option on Linux, and a build setting on ESP32. The Linux daemon logs the IDs it sends and accepts at startup, so a node left behind during a change is easy to spot.
 
 ## Layer 2: end-to-end encryption
 
@@ -146,7 +146,16 @@ The first byte inside the ciphertext names what the payload is (an IP packet, an
 
 For the future LoRa tier, where a round trip can take seconds, one-off messages could use per-message ephemeral keys instead. That can be added as a second payload type later.
 
-**Broadcast and group messages** (like Meshtastic channels) would use a group key. That comes after unicast.
+### Channels
+
+**Group messages** use channels, like Meshtastic's. A channel is a 32-byte key its members share, written as `smc1-` followed by 55 base32 characters, with a checksum, like a mesh key.
+
+- **Encryption:** XChaCha20-Poly1305 under a key derived from the channel key, with a random 24-byte nonce, so nothing has to be counted or stored across restarts. The origin node and a random message ID are authenticated with the data, so relays can't change them.
+- **Flooding:** every node rebroadcasts each new channel message once, until its TTL runs out, and remembers recent (origin, message ID) pairs for a minute, so copies arriving by other paths are dropped. Nodes relay every channel's messages, including ones they can't read.
+- **Limit:** messages aren't signed per sender, so any member of a channel can claim another member's node as a message's origin. Members of a channel trust each other with it; nobody else can read or forge its messages.
+- **Cost:** 46 bytes per message on top of a data frame's 51. Blind flooding sends every message once per node; choosing relays, as OLSR's multipoint relays do, would reduce that on slow hues.
+
+Broadcasts meant only for neighbors stay as they were: protected by the mesh key alone, and never relayed.
 
 ## Routing integrity
 
@@ -154,14 +163,16 @@ Link authentication keeps outsiders out of routing entirely. Against a member:
 
 | Attack | Effect | Covered? |
 |---|---|---|
-| Forging a newer seqno for another node | Pulls all traffic for that node through the attacker | **Phase 3**: origins sign their seqnos |
+| Forging a newer seqno for another node | Pulls all traffic for that node through the attacker | **Yes**, phase 3: origins sign their seqnos |
 | Advertising a falsely low metric | Pulls nearby traffic through the attacker | No. This is an open research problem for distance-vector protocols (hash-chain schemes such as SEAD exist, but are expensive) |
 | Dropping traffic it relays | Black hole | No. End-to-end acknowledgements can at least detect it |
 | Reading or changing relayed data | None: the data is encrypted and authenticated end to end | **Yes**, layer 2 |
 
-**Phase 3, signed seqnos:** when a node raises its seqno, it signs `(node ID, seqno)` with Ed25519. Relays pass the 64-byte signature along with the first update carrying that seqno, and nodes only accept a newer seqno with a valid signature. Seqnos change rarely, so this costs little. It needs identity discovery first, so it comes last.
+**Signed seqnos:** every node signs each seqno it issues for its own route with its Ed25519 key, over `"SpectraMesh seqno v1"`, its node ID and the seqno. The signature travels as a **SeqnoProof**, which also carries the node's public keys, so a receiver can check it without first asking for them. Proofs go out in triggered updates and in the first full update to a newly verified neighbor, and nodes forward the best proof they hold for each destination.
 
-**Reboots:** a rebooted node restarts its seqno at 0, which its neighbors see as old. The existing seqno-request mechanism should already recover from this: neighbors request a newer seqno, and the node jumps to it. A test will confirm that before v2 ships.
+A node ignores any update whose seqno is newer than the newest one it has a valid proof for, and asks that neighbor for the destination's route, which comes with its proof. A replayed old proof can only claim a seqno the destination really issued; if the destination has since restarted and started again from 0, it raises its seqno past the replayed one as soon as neighbors ask, which they do when its updates look old.
+
+**Reboots:** a rebooted node restarts its seqno at 0, which its neighbors see as old. The seqno-request mechanism recovers: neighbors request a newer seqno, and the node jumps to it and signs it. A test confirms routes recover after a restart.
 
 ## Wire format v2
 
@@ -185,7 +196,7 @@ The common header, then TLVs, then the trailer. Changes from v1:
 | IHU, Update, RouteRequest, SeqnoRequest | Node IDs grow to 8 bytes |
 | **ChallengeRequest**, **ChallengeReply** | New: 8-byte nonce |
 | **IdentityRequest**, **Identity** | New: node ID, then 64 bytes of public keys |
-| **SeqnoSignature** | New in phase 3: node ID, seqno and a 64-byte signature |
+| **SeqnoProof** | New in phase 3: the node's public keys (64 bytes), seqno and a 64-byte signature |
 
 ### Data frames
 
@@ -200,14 +211,22 @@ The common header, then TLVs, then the trailer. Changes from v1:
 
 The header's sender changes at every hop, and is what the trailer is checked against. The origin stays the same end to end.
 
-Noise handshake messages travel as data frames, with their own payload kind.
+Noise handshake messages travel as data frames, with their own payload kind. Broadcast data frames start with a kind byte instead: 0 for neighbors only, 1 for a channel message.
+
+### Fragment frames
+
+A data frame too big for the next hue is split into **fragment frames** (kind 3), and reassembled by the next node before it's routed further: per hop, as 6LoWPAN does in mesh networks, because a route can mix hues of different sizes. Each fragment carries the common header, a 6-byte fragment header (datagram ID, offset, total length), a chunk of the data frame's body, and its own trailer, so nodes outside the mesh can't inject fragments. Reassembled bodies are at most 1,600 bytes; a node keeps at most 8 partial datagrams, for 5 seconds each.
+
+Control frames aren't fragmented, so every hue must carry at least 166 bytes, the size of a frame with one SeqnoProof. Every radio SpectraMesh targets does.
 
 ### Overhead
 
 | | v1 | v2 |
 |---|---|---|
 | Hello frame | 15 bytes | 40 bytes |
-| Data overhead per frame | 14 bytes | 81 bytes (51 for broadcasts to neighbors, which aren't end-to-end encrypted) |
+| Data overhead per frame | 14 bytes | 81 bytes (52 for broadcasts to neighbors, 97 for channel messages) |
+| Overhead per fragment | | 40 bytes |
+| Largest end-to-end payload | | 1,553 bytes, fragmented where needed |
 | Payload in a 250-byte ESP-NOW v1 frame | 236 | **169** |
 | Payload in a 255-byte sub-GHz FSK frame | 241 | **174** |
 | Payload in a 1,470-byte ESP-NOW v2 frame | 1,456 | **1,389** |
@@ -267,7 +286,14 @@ Overheads above include both changes.
 2. **The handshake init carries the initiator's Ed25519 key.** The responder needs both public keys to check them against the claimed node ID, and Noise only carries the X25519 one.
 3. **Liveness timers** (keepalive after 10 seconds, new handshake after 15 seconds of silence) were added, so a session recovers quickly when the other side restarts.
 4. **Identity answers only count if someone asked for them**, so a member can't fill other nodes' caches with keys nobody wanted.
-5. **Broadcasts to neighbors stay protected only by the mesh key** until phase 3 adds group keys.
+5. **Broadcasts to neighbors stay protected only by the mesh key.** Phase 3 adds channels for group messages that need more.
+
+## Changes during phase 3
+
+1. **Proofs carry the signer's public keys**, so receivers can verify them straight away instead of waiting for identity discovery. That makes a SeqnoProof 130 bytes, and sets the minimum hue size at 166 bytes.
+2. **Proofs go out only when they matter**: in triggered updates, and in the first full update to a new neighbor. A node that can't accept an update asks for the destination's route, which brings its proof.
+3. **Channels use random 192-bit nonces (XChaCha20)** instead of counters, so nodes never have to persist anything to keep nonces unique.
+4. **Fragmentation and ICMPv6 errors** were added alongside phase 3, closing the gaps phase 2 left: IPv6 now crosses 250-byte hues, and the Linux daemon answers undeliverable packets with "no route" errors.
 
 ## Decisions
 

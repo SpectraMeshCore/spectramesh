@@ -4,8 +4,9 @@ START=90
 STOP=10
 USE_PROCD=1
 PROG=/usr/sbin/spectrameshd
-# Mesh keys are copied here, in RAM, readable only by root.
+# Mesh and channel keys are copied here, in RAM, readable only by root.
 KEY_FILE=/var/run/spectramesh/mesh.key
+CHANNEL_FILE=/var/run/spectramesh/channels.key
 
 add_hue() {
 	local cfg="$1" device kind bitrate freq mtu spec
@@ -28,6 +29,10 @@ write_key() {
 	echo "$1" >>"$KEY_FILE"
 }
 
+write_channel_key() {
+	echo "$1" >>"$CHANNEL_FILE"
+}
+
 start_service() {
 	local enabled identity
 
@@ -38,6 +43,8 @@ start_service() {
 	mkdir -p "${KEY_FILE%/*}"
 	(umask 077 && : >"$KEY_FILE")
 	config_list_foreach main mesh_key write_key
+	(umask 077 && : >"$CHANNEL_FILE")
+	config_list_foreach main channel_key write_channel_key
 	if [ ! -s "$KEY_FILE" ]; then
 		echo "spectramesh: no mesh_key set in /etc/config/spectramesh" >&2
 		return 1
@@ -45,6 +52,7 @@ start_service() {
 
 	procd_open_instance
 	procd_set_param command "$PROG" --mesh-key-file "$KEY_FILE"
+	[ -s "$CHANNEL_FILE" ] && procd_append_param command --channel-key-file "$CHANNEL_FILE"
 	config_get identity main identity /etc/spectramesh/node.key
 	procd_append_param command --identity "$identity"
 	config_get tun main tun

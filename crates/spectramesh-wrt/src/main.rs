@@ -18,7 +18,8 @@ use std::path::Path;
 
 use spectramesh_core::packet::DATA_OVERHEAD;
 use spectramesh_core::{
-    Config as RouterConfig, HueId, HueInfo, MAX_PAYLOAD, MeshKey, Router, TRANSPORT_OVERHEAD,
+    ChannelKey, Config as RouterConfig, HueId, HueInfo, MAX_PAYLOAD, MeshKey, Router,
+    TRANSPORT_OVERHEAD,
 };
 
 use crate::config::{Command, Config, USAGE};
@@ -33,7 +34,12 @@ fn main() -> ExitCode {
     }
     let config = match config::parse(args) {
         Ok(Command::Run(config)) => config,
-        Ok(Command::GenerateMeshKey) => return generate_mesh_key(),
+        Ok(Command::GenerateMeshKey) => {
+            return generate(|bytes| MeshKey::from_bytes(bytes).to_text());
+        }
+        Ok(Command::GenerateChannelKey) => {
+            return generate(|bytes| ChannelKey::from_bytes(bytes).to_text());
+        }
         Ok(Command::NodeInfo {
             identity_file,
             mesh_key_file,
@@ -51,10 +57,11 @@ fn main() -> ExitCode {
     ExitCode::FAILURE
 }
 
-fn generate_mesh_key() -> ExitCode {
+/// Prints a new random key, as text from `to_text`.
+fn generate(to_text: impl FnOnce([u8; 32]) -> String) -> ExitCode {
     match keys::random_bytes() {
         Ok(bytes) => {
-            println!("{}", MeshKey::from_bytes(bytes).to_text());
+            println!("{}", to_text(bytes));
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -114,6 +121,14 @@ fn run(config: Config) -> io::Error {
         Err(err) => return err,
     };
     let prefix = Prefix(config.ipv6_prefix.unwrap_or(key_prefix));
+    let ids: Vec<String> = mesh_keys.ids().map(|id| id.to_string()).collect();
+    let channels = match &config.channel_key_file {
+        Some(file) => match keys::load_channel_keys(file) {
+            Ok(channels) => channels,
+            Err(err) => return err,
+        },
+        None => Vec::new(),
+    };
     // Fresh for every run; see `Router::new`.
     let seed = match keys::random_bytes() {
         Ok(seed) => seed,
@@ -160,6 +175,16 @@ fn run(config: Config) -> io::Error {
     let mut router = Router::new(identity, mesh_keys, RouterConfig::default(), seed);
     for info in infos {
         router.add_hue(info);
+    }
+    // Key IDs help when changing keys: every node should list the same ones.
+    info!(
+        "mesh key IDs: sending with {}, accepting {}",
+        ids[0],
+        ids.join(", ")
+    );
+    for channel in channels {
+        info!("joined channel {}", channel.id());
+        router.join_channel(channel);
     }
     let devices: Vec<&str> = hues.iter().map(|h| h.device.as_str()).collect();
     info!(

@@ -36,7 +36,7 @@ On switched networks, the platform can unicast instead of broadcasting: every fr
 
 ## Security
 
-Phases 1 and 2 of the [security design](../../docs/design/wire-format-v2.md) are in place:
+All three phases of the [security design](../../docs/design/wire-format-v2.md) are in place:
 
 - **Node IDs come from keys.** Each node keeps a 32-byte secret, from which it derives Ed25519 and X25519 key pairs. Its 8-byte node ID is the start of a hash of the public keys, so claiming another node's ID means finding keys that hash to it ([`identity.rs`](src/identity.rs)).
 - **Every frame is authenticated** with an 8-byte tag keyed with the shared mesh key. Nodes without the key can't inject or alter anything ([`auth.rs`](src/auth.rs)).
@@ -45,7 +45,14 @@ Phases 1 and 2 of the [security design](../../docs/design/wire-format-v2.md) are
 - **Unicast data is encrypted end to end** ([`session.rs`](src/session.rs)), so relays and other members can't read or alter it. Nodes find each other's public keys by asking along the route, then set up a session with one round trip of the Noise IK handshake, as WireGuard does. Sessions are replaced every 2 minutes and recover on their own when the other side restarts.
 - **Deliveries say who sent them.** Each delivery carries the sender's public keys as proven by the handshake, so an application can compare the full identity hash with the one it expects.
 
-Broadcasts to neighbors are only protected by the mesh key; group keys are phase 3.
+- **Members can't hijack other nodes' routes.** Every node signs the sequence numbers it issues for its own route, and nodes ignore newer sequence numbers that come without a valid signature ([`router/proofs.rs`](src/router/proofs.rs)). A member can still advertise a falsely low cost, which no practical distance-vector protocol prevents.
+- **Channels** carry encrypted group messages across the whole mesh, like Meshtastic channels ([`channel.rs`](src/channel.rs)). Members share a channel key; every node relays channel messages, but only members can read them.
+
+Broadcasts meant only for neighbors are protected by the mesh key alone.
+
+## Fragmentation
+
+Data too big for a hue is split into fragments and reassembled by the next node ([`fragment.rs`](src/fragment.rs)), so a route can mix Ethernet and 250-byte radio hops. Payloads of up to 1,553 bytes go anywhere. Hues must carry at least 166-byte frames, which every radio SpectraMesh targets does.
 
 ## Using it
 
@@ -74,7 +81,8 @@ router.add_hue(HueInfo::new(HueId(2), HueKind::Ethernet, 1500, 1_000_000_000));
 Version 2: an 18-byte header (version and frame kind, mesh key ID, sender, next hop), a body, and a 16-byte trailer (boot index, counter, tag):
 
 - **Control frames**: Babel-style TLVs (hello, IHU, update, route and seqno requests, challenges), several per frame.
-- **Data frames**: origin, destination and TTL, then the payload: for unicast, an end-to-end message (a handshake, or encrypted data). 81 bytes of overhead in all for encrypted data.
+- **Data frames**: origin, destination and TTL, then the payload: for unicast, an end-to-end message (a handshake, or encrypted data), and for broadcasts, a neighbor message or a channel message. 81 bytes of overhead in all for encrypted unicast data, 97 for a channel message.
+- **Fragment frames**: a piece of a data frame too big for the hue.
 
 See [`packet.rs`](src/packet.rs) and the [design document](../../docs/design/wire-format-v2.md). The format is SpectraMesh's own, so it doesn't exchange routes with `babeld`.
 
@@ -87,5 +95,4 @@ Each is marked with a `TODO` in the code.
 - Hysteresis, so near-equal routes don't flap
 - Split horizon on wired hues, to send smaller updates on switched networks
 - Telling 1 Gbit/s from 10 Gbit/s links apart (both cost 1)
-- Mesh-wide broadcast (today, broadcast reaches direct neighbors only)
-- Signed seqnos and group keys (phase 3 of the security design)
+- Choosing relays for channel messages, as OLSR's multipoint relays do, instead of every node rebroadcasting each one

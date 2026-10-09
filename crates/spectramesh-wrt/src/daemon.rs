@@ -147,7 +147,16 @@ pub fn run(
                         warn!("writing to {} failed: {err}", device.name);
                     }
                 }
-                _ => info!("{} bytes from {}", delivery.payload.len(), delivery.src),
+                // TODO: a local interface for programs to send and receive
+                // on channels.
+                _ => match delivery.channel {
+                    Some(channel) => info!(
+                        "channel {channel}: {} bytes from {}",
+                        delivery.payload.len(),
+                        delivery.src
+                    ),
+                    None => info!("{} bytes from {}", delivery.payload.len(), delivery.src),
+                },
             }
         }
 

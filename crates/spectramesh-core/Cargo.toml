@@ -14,6 +14,7 @@ categories = ["network-programming", "embedded", "no-std"]
 [dependencies]
 # The versions snow uses, so firmware carries one copy of each primitive.
 blake2 = { version = "0.10.6", default-features = false }
+chacha20poly1305 = { version = "0.10.1", default-features = false }
 ed25519-dalek = { version = "2.2.0", default-features = false }
 snow = { version = "0.10.0", default-features = false, features = ["default-resolver", "use-curve25519", "use-chacha20poly1305", "use-blake2"] }
 x25519-dalek = { version = "2.0.1", default-features = false, features = ["static_secrets"] }

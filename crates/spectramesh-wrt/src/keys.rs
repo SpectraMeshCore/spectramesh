@@ -9,7 +9,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use log::{info, warn};
-use spectramesh_core::{Identity, KeyRing, MeshKey};
+use spectramesh_core::{ChannelKey, Identity, KeyRing, MeshKey};
 
 /// Fills `buf` from the kernel's cryptographic random number generator.
 pub fn random_bytes<const N: usize>() -> io::Result<[u8; N]> {
@@ -102,6 +102,29 @@ pub fn load_mesh_keys(path: &Path) -> io::Result<(KeyRing, [u8; 8])> {
     })
 }
 
+/// Reads channel keys from `path`, one per line, ignoring blank lines and
+/// lines starting with `#`.
+pub fn load_channel_keys(path: &Path) -> io::Result<Vec<ChannelKey>> {
+    let text = fs::read_to_string(path)
+        .map_err(|err| io::Error::new(err.kind(), format!("{}: {err}", path.display())))?;
+    warn_if_readable_by_others(path);
+    let mut keys = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let key = ChannelKey::from_text(line).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} line {}: {err}", path.display(), number + 1),
+            )
+        })?;
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
 fn warn_if_readable_by_others(path: &Path) {
     if fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o077 != 0) {
         warn!(
@@ -179,6 +202,33 @@ mod tests {
                 .to_string()
                 .contains("line 1")
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn channel_key_files_list_channels() {
+        let dir = temp_dir("channels");
+        let path = dir.join("channels.key");
+        let (a, b) = (
+            ChannelKey::from_bytes([1; 32]),
+            ChannelKey::from_bytes([2; 32]),
+        );
+        fs::write(
+            &path,
+            format!("{}\n# off for now\n{}\n", a.to_text(), b.to_text()),
+        )
+        .unwrap();
+        let ids: Vec<_> = load_channel_keys(&path)
+            .unwrap()
+            .iter()
+            .map(ChannelKey::id)
+            .collect();
+        assert_eq!(ids, [a.id(), b.id()]);
+
+        // A mesh key in the wrong file is caught.
+        fs::write(&path, MeshKey::from_bytes([1; 32]).to_text()).unwrap();
+        let err = load_channel_keys(&path).unwrap_err().to_string();
+        assert!(err.contains("smc1-"), "{err}");
         fs::remove_dir_all(dir).unwrap();
     }
 

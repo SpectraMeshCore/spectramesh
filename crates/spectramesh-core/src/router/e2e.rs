@@ -282,6 +282,7 @@ impl Router {
                         src: origin,
                         payload,
                         sender_keys: Some(peer),
+                        channel: None,
                     });
                 }
             }

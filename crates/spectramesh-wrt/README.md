@@ -39,7 +39,7 @@ Run `spectrameshd --help` for every option. Each node logs its neighbors and rou
 
 ### Changing the mesh key
 
-List more than one key in the mesh key file, one per line. Nodes send with the first and accept all of them. To change keys without downtime: add the new key as a second line everywhere, then move it to the first line everywhere, then remove the old one.
+List more than one key in the mesh key file, one per line. Nodes send with the first and accept all of them. To change keys without downtime: add the new key as a second line everywhere, then move it to the first line everywhere, then remove the old one. Each node logs the key IDs it sends with and accepts when it starts, so you can check every node has the same keys at each stage.
 
 ### IPv6 over the mesh
 
@@ -55,7 +55,13 @@ $ ping fd72:a1fd:63c4:0:5ace:d589:2ccb:f39d
 
 The prefix comes from the first mesh key, so changing the key changes every address. To keep addresses stable, pick a prefix and pass it to every node with `--ipv6-prefix fd12:3456:789a::`.
 
-The TUN device needs root or `CAP_NET_ADMIN`. Its MTU is the smallest hue's MTU less SpectraMesh's 81 bytes of overhead, and IPv6 needs at least 1,280, so every hue must be Ethernet-sized. Packets arriving from the mesh are only passed to the system if their source address belongs to the node that sent them.
+The TUN device needs root or `CAP_NET_ADMIN`. Its MTU is the smallest hue's MTU less SpectraMesh's 81 bytes of overhead, so packets usually cross the mesh whole. If a hue is too small for that, as a 250-byte radio link is, the MTU is IPv6's minimum of 1,280 and SpectraMesh fragments packets on the small links.
+
+Packets arriving from the mesh are only passed to the system if their source address belongs to the node that sent them. Packets to an address in the mesh that no node has are answered straight away with an ICMPv6 "destination unreachable" error.
+
+### Channels
+
+Channels carry encrypted group messages across the whole mesh. Make a key with `spectrameshd --generate-channel-key`, give it to every member, and list it in a file passed with `--channel-key-file` (one key per line). Every node relays channel messages, but only members can read them. For now the daemon logs the messages it receives; a local interface for programs to send and receive on channels is still to come.
 
 ## Trying it without hardware
 
@@ -119,7 +125,7 @@ config hue
 	option bitrate '100M'
 ```
 
-Add `option tun 'smesh0'` to the `main` section to carry IPv6, and set `option ipv6_prefix` to keep addresses stable when the mesh key changes. Then `service spectramesh start`, and watch it with `logread -f`.
+Add `option tun 'smesh0'` to the `main` section to carry IPv6, and set `option ipv6_prefix` to keep addresses stable when the mesh key changes. Add `list channel_key 'smc1-...'` lines to join channels. Then `service spectramesh start`, and watch it with `logread -f`.
 
 The TUN device isn't in any firewall zone until you add it. To control what can reach the router over the mesh, put `smesh0` in a zone: for example, an interface with `option device 'smesh0'` and `option proto 'none'` in `/etc/config/network`, added to a zone in `/etc/config/firewall`.
 
@@ -166,7 +172,7 @@ It uses plain threads, with no async runtime, to keep the binary small for route
 
 ## Next steps
 
-- **ICMPv6 errors** (unreachable, packet too big) for packets that can't be delivered; today they're dropped
+- **A local interface** (such as a Unix socket) for programs to send and receive on channels
 - **Routing a whole LAN's traffic**, so devices behind a router reach the mesh without running SpectraMesh themselves
 - **A UDP hue**, for linking sites over the internet or networks SpectraMesh doesn't control
 - **Status over ubus**, and a LuCI page
