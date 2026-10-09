@@ -1,0 +1,20 @@
+[package]
+name = "spectramesh-wrt"
+description = "SpectraMesh routing daemon for OpenWRT and other Linux systems"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+publish = false
+
+[[bin]]
+name = "spectrameshd"
+path = "src/main.rs"
+
+[dependencies]
+spectramesh-core = { path = "../spectramesh-core" }
+libc = "0.2.190"
+log = { version = "0.4.34", features = ["std"] }
