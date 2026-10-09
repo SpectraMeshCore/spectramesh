@@ -1,5 +1,7 @@
 # SpectraMesh
 
+[![CI](https://github.com/SpectraMeshCore/spectramesh/actions/workflows/ci.yml/badge.svg)](https://github.com/SpectraMeshCore/spectramesh/actions/workflows/ci.yml)
+
 A multi-band mesh networking stack for ESP32, OpenWRT, desktops and laptops.
 
 SpectraMesh routes across every radio a node has as one network, using Babel-style loop-free routing. Each radio link is a **hue**:
