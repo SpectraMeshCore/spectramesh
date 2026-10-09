@@ -1,0 +1,42 @@
+[package]
+name = "spectramesh-esp"
+description = "SpectraMesh firmware for ESP32 boards"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/SpectraMeshCore/spectramesh"
+publish = false
+
+[[bin]]
+name = "spectramesh-esp"
+path = "./src/bin/main.rs"
+test = false
+bench = false
+
+[dependencies]
+spectramesh-core = { path = "../spectramesh-core" }
+
+esp-hal = { version = "~1.2.2", features = ["esp32c6", "log-04", "unstable"] }
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio", "esp32c6", "log-04"] }
+esp-radio = { version = "1.0.0-beta.1", features = ["esp-alloc", "esp-now", "esp32c6", "log-04", "unstable", "wifi"] }
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c6", "log-04"] }
+esp-alloc = { version = "0.11.0", features = ["esp32c6"] }
+esp-backtrace = { version = "0.20.0", features = ["esp32c6", "panic-handler", "println"] }
+esp-println = { version = "0.18.0", features = ["esp32c6", "log-04"] }
+
+embassy-executor = { version = "0.10.0", features = ["log"] }
+embassy-futures = "0.1.2"
+embassy-sync = "0.8.0"
+embassy-time = { version = "0.5.0", features = ["log"] }
+log = "0.4.27"
+
+[profile.dev]
+# The default debug profile is too slow and too big for microcontrollers.
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"

@@ -17,15 +17,16 @@ Routes pick the fastest hue that reaches, and can mix hues hop by hop. Nodes cab
 | Package | Runs on |
 |---|---|
 | [`spectramesh-core`](crates/spectramesh-core) | Routing engine, shared by every platform (`no_std`, Rust) |
-| `spectramesh-esp` | ESP32 firmware |
+| [`spectramesh-esp`](crates/spectramesh-esp) | ESP32 firmware, with ESP-NOW (`no_std`, Rust, embassy) |
 | `spectramesh-wrt` | OpenWRT package |
 
 ## Status
 
-Early development. `spectramesh-core` routes between simulated nodes in its tests; there are no radio drivers yet.
+Early development. `spectramesh-core` routes between simulated nodes in its tests, and `spectramesh-esp` runs it on ESP32-C6 boards over ESP-NOW.
 
 ```
-cargo test
+cargo test                                        # core tests
+cd crates/spectramesh-esp && cargo run --release  # flash a board
 ```
 
 ## License
