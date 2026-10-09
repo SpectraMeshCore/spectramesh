@@ -12,7 +12,7 @@ use spectramesh_core::{HueId, HueInfo, HueKind};
 use crate::mesh::{INBOX, Outbox, Received};
 
 /// ESP-NOW's default PHY rate.
-const BITRATE_BPS: u32 = 1_000_000;
+const BITRATE_BPS: u64 = 1_000_000;
 
 /// Describes the ESP-NOW hue for the router.
 //
