@@ -13,8 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use log::{debug, error, info, warn};
-use spectramesh_core::packet::control_sender;
-use spectramesh_core::{HueId, Instant, NodeId, Router};
+use spectramesh_core::{Error, HueId, Instant, NodeId, Router};
 
 use crate::link::{BROADCAST_MAC, EthernetSocket, Mac};
 
@@ -47,8 +46,8 @@ pub fn run(mut router: Router, hues: Vec<Hue>, report_interval: Duration) -> io:
 
     let start = std::time::Instant::now();
     let now = || Instant::from_millis(start.elapsed().as_millis() as u64);
-    // Link-layer address of each neighbor, learned from its control frames,
-    // so frames for one neighbor can be unicast instead of broadcast.
+    // Link-layer address of each neighbor, learned from frames the router
+    // has authenticated, so frames for one neighbor can be unicast.
     //
     // TODO: forget addresses of neighbors the router has dropped.
     let mut macs: BTreeMap<(HueId, NodeId), Mac> = BTreeMap::new();
@@ -58,14 +57,17 @@ pub fn run(mut router: Router, hues: Vec<Hue>, report_interval: Duration) -> io:
         let wakeup = router.next_wakeup().min(next_report);
         let timeout = Duration::from_millis(wakeup.as_millis().saturating_sub(now().as_millis()));
         match received.recv_timeout(timeout) {
-            Ok(frame) => {
-                if let Some(sender) = control_sender(&frame.frame) {
+            Ok(frame) => match router.handle_frame(frame.hue, &frame.frame, now()) {
+                Ok(Some(sender)) => {
                     macs.insert((frame.hue, sender), frame.src_mac);
                 }
-                if let Err(err) = router.handle_frame(frame.hue, &frame.frame, now()) {
-                    debug!("dropped a frame on hue {}: {err}", frame.hue.0);
+                Ok(None) => {}
+                // Outsiders and damaged frames are worth knowing about.
+                Err(err @ (Error::BadTag | Error::Replay)) => {
+                    warn!("dropped a frame on hue {}: {err}", frame.hue.0);
                 }
-            }
+                Err(err) => debug!("dropped a frame on hue {}: {err}", frame.hue.0),
+            },
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 return io::Error::other("every receive thread has stopped");

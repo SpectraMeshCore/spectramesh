@@ -21,6 +21,15 @@ pub enum Error {
     NoRoute(NodeId),
     /// The packet is larger than the hue it must travel on can carry.
     PayloadTooLarge,
+    /// The frame's tag doesn't verify with any accepted mesh key: it came
+    /// from outside the mesh, or was damaged or altered.
+    BadTag,
+    /// The frame was already received once.
+    Replay,
+    /// The frame is authentic, but its sender's boot index hasn't passed a
+    /// challenge yet, so it could be a recording. Routine when a neighbor
+    /// appears or restarts.
+    Unverified,
 }
 
 impl fmt::Display for Error {
@@ -33,6 +42,9 @@ impl fmt::Display for Error {
             Error::UnknownHue(h) => write!(f, "unknown hue {}", h.0),
             Error::NoRoute(n) => write!(f, "no route to {n}"),
             Error::PayloadTooLarge => f.write_str("payload is larger than the hue's MTU"),
+            Error::BadTag => f.write_str("frame tag doesn't verify with any mesh key"),
+            Error::Replay => f.write_str("frame was already received"),
+            Error::Unverified => f.write_str("sender not yet verified; challenge sent"),
         }
     }
 }

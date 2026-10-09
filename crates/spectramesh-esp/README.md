@@ -16,13 +16,13 @@ You need [`espflash`](https://github.com/esp-rs/espflash) once:
 cargo install espflash --locked
 ```
 
-Then, from this directory, with a board plugged in over USB:
+Every node in a mesh needs the same mesh key, which is built into the firmware for now. Make one with `spectrameshd --generate-mesh-key` (from [`spectramesh-wrt`](../spectramesh-wrt)), keep it somewhere safe, then, from this directory, with a board plugged in over USB:
 
 ```
-cargo run --release
+SPECTRAMESH_MESH_KEY=smk1-... cargo run --release
 ```
 
-That builds, flashes and opens the serial monitor. `rust-toolchain.toml` makes rustup add the RISC-V target and Rust's source code on the first build.
+That builds, flashes and opens the serial monitor. Firmware built without a key logs an error and doesn't start. Treat built firmware images like the key itself. `rust-toolchain.toml` makes rustup add the RISC-V target and Rust's source code on the first build.
 
 This crate is excluded from the root workspace because it builds for the board, not your computer. Run cargo commands from this directory.
 
@@ -31,15 +31,15 @@ This crate is excluded from the root workspace because it builds for the board, 
 On boot, each board:
 
 1. Starts Wi-Fi and ESP-NOW on channel 1 (`ESPNOW_CHANNEL` in `src/bin/main.rs`). All boards must use the same channel.
-2. Takes its node ID from the last four bytes of its Wi-Fi MAC address.
+2. Loads its secret from flash, or on first boot creates one with the hardware random number generator and stores it. Its node ID comes from that secret, so it survives reflashing the firmware (but not erasing the whole flash).
 3. Runs the router, which sends hellos, measures links and builds routes.
 4. Logs its neighbors and routes every 30 seconds:
 
 ```
-INFO - SpectraMesh node !a1b2c3d4 running on ESP-NOW channel 1
-INFO - node !a1b2c3d4: 2 neighbor links, 2 routes
-INFO -   !0e0f1011 via !0e0f1011 on hue 0, cost 800 us
-INFO -   !12131415 via !0e0f1011 on hue 0, cost 1600 us
+INFO - SpectraMesh node !a1b2c3d4e5f60718 running on ESP-NOW channel 1
+INFO - node !a1b2c3d4e5f60718: 2 neighbor links, 2 routes
+INFO -   !0e0f101112131415 via !0e0f101112131415 on hue 0, cost 800 us
+INFO -   !161718191a1b1c1d via !0e0f101112131415 on hue 0, cost 1600 us
 ```
 
 ## How it's organized
@@ -48,6 +48,7 @@ INFO -   !12131415 via !0e0f1011 on hue 0, cost 1600 us
 |---|---|
 | `src/bin/main.rs` | Starts the hardware, registers hues and spawns tasks |
 | `src/mesh.rs` | The router task. It owns the `Router`, wakes on received frames and timers, and hands frames to each hue's send queue |
+| `src/identity_store.rs` | Keeps the node's secret in the first sector of the `nvs` flash partition, which this firmware doesn't otherwise use |
 | `src/espnow.rs` | The ESP-NOW hue: a receive task and a send task |
 
 Each hue talks to the router only through channels. To add a radio, write a module like `espnow.rs` with a receive task that feeds `mesh::INBOX` and a send task that reads its own `Outbox`, then register it in `main.rs`.
@@ -64,4 +65,5 @@ The Xtensa chips (the original ESP32 and the S3) need Espressif's toolchain from
 - **Unicast ESP-NOW** to the next hop, for link-layer acknowledgements and retries
 - **ESP-NOW v2**, raising the MTU from 250 to 1470 bytes
 - **An application interface**, so code on the board can send and receive mesh data (today, received data is only logged)
-- **Node IDs from a key pair** stored in flash
+- **Mesh keys provisioned over the serial console** and kept in flash, so one firmware image works for every mesh
+- **Flash encryption**, so someone holding a board can't read its secret or the mesh key out of flash

@@ -1,131 +1,176 @@
-//! Wire format.
+//! Wire format, version 2. See `docs/design/wire-format-v2.md` for the reasoning.
 //!
-//! Every frame starts with the same 9 bytes. Multi-byte fields are big-endian.
+//! Every frame is a header, a body and a trailer. Multi-byte fields are big-endian.
 //!
-//! | Bytes | Field                                                                |
-//! |-------|----------------------------------------------------------------------|
-//! | 0     | Protocol version (high 4 bits) and frame kind (low 4 bits)          |
-//! | 1..5  | Source                                                               |
-//! | 5..9  | Next hop: the node that should handle this transmission, or broadcast |
+//! **Header** (18 bytes):
+//!
+//! | Bytes  | Field                                                       |
+//! |--------|-------------------------------------------------------------|
+//! | 0      | Protocol version (high 4 bits) and frame kind (low 4 bits)  |
+//! | 1      | Mesh key ID                                                 |
+//! | 2..10  | Sender: the node that transmitted this frame                |
+//! | 10..18 | Next hop: the node that should handle it, or broadcast      |
 //!
 //! The next hop is in every header because hues like LoRa have no link-layer
 //! addressing, so every receiver needs to know whether a frame is for it.
 //!
-//! **Control frames** carry routing messages between neighbors and never go
-//! further than one hop. The source is the sending neighbor. The rest of the
-//! frame is a list of [`Tlv`]s (type, length, value), as in Babel, so several
-//! messages share one frame. Receivers skip TLV types they don't know, so
-//! newer nodes can add types without breaking older ones.
+//! **Body**, for **control frames**: routing messages between neighbors, as a
+//! list of [`Tlv`]s (type, length, value). Receivers skip TLV types they don't
+//! know, so newer nodes can add types without breaking older ones.
 //!
-//! **Data frames** carry application data across the mesh. The source is the
-//! node that created the packet, and the common header continues with:
+//! **Body**, for **data frames**: application data crossing the mesh.
 //!
-//! | Bytes  | Field       |
-//! |--------|-------------|
-//! | 9..13  | Destination |
-//! | 13     | TTL: how many more hops the packet may take |
+//! | Bytes | Field                                        |
+//! |-------|----------------------------------------------|
+//! | 0..8  | Origin: the node that created the packet     |
+//! | 8..16 | Destination                                  |
+//! | 16    | TTL: how many more hops the packet may take  |
+//! | 17..  | Payload                                      |
 //!
-//! followed by the payload.
+//! **Trailer** (16 bytes): the sender's boot index (4), a counter (4) and a
+//! tag (8) over everything before it. See [`auth`](crate::auth).
 
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use crate::auth::{TAG_LEN, TRAILER_LEN};
 use crate::error::{Error, Result};
 use crate::node::NodeId;
 
-pub const VERSION: u8 = 1;
-pub const CONTROL_HEADER_LEN: usize = 9;
-pub const DATA_HEADER_LEN: usize = 14;
+pub const VERSION: u8 = 2;
+pub const HEADER_LEN: usize = 18;
+/// Bytes of a data frame's body before the payload.
+pub const DATA_HEADER_LEN: usize = 17;
+/// Bytes every control frame spends on its header and trailer.
+pub const CONTROL_OVERHEAD: usize = HEADER_LEN + TRAILER_LEN;
+/// Bytes every data frame spends on its headers and trailer.
+pub const DATA_OVERHEAD: usize = HEADER_LEN + DATA_HEADER_LEN + TRAILER_LEN;
 
-const KIND_CONTROL: u8 = 1;
-const KIND_DATA: u8 = 2;
-
-#[derive(Clone, Debug)]
-pub enum Frame<'a> {
-    Control {
-        src: NodeId,
-        next_hop: NodeId,
-        tlvs: Tlvs<'a>,
-    },
-    Data {
-        header: DataHeader,
-        payload: &'a [u8],
-    },
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FrameKind {
+    Control = 1,
+    Data = 2,
 }
 
-impl<'a> Frame<'a> {
-    pub fn decode(frame: &'a [u8]) -> Result<Self> {
-        if frame.len() < CONTROL_HEADER_LEN {
-            return Err(Error::Truncated);
-        }
-        let version = frame[0] >> 4;
-        if version != VERSION {
-            return Err(Error::UnsupportedVersion(version));
-        }
-        let src = node_at(frame, 1);
-        let next_hop = node_at(frame, 5);
-        match frame[0] & 0x0f {
-            KIND_CONTROL => Ok(Frame::Control {
-                src,
-                next_hop,
-                tlvs: Tlvs(&frame[CONTROL_HEADER_LEN..]),
-            }),
-            KIND_DATA => {
-                if frame.len() < DATA_HEADER_LEN {
-                    return Err(Error::Truncated);
-                }
-                let header = DataHeader {
-                    src,
-                    next_hop,
-                    dst: node_at(frame, 9),
-                    ttl: frame[13],
-                };
-                Ok(Frame::Data {
-                    header,
-                    payload: &frame[DATA_HEADER_LEN..],
-                })
-            }
-            other => Err(Error::UnknownFrameKind(other)),
-        }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Header {
+    pub kind: FrameKind,
+    pub key_id: u8,
+    pub sender: NodeId,
+    pub next_hop: NodeId,
+}
+
+impl Header {
+    pub fn encode(&self, buf: &mut Vec<u8>) {
+        buf.push(VERSION << 4 | self.kind as u8);
+        buf.push(self.key_id);
+        buf.extend_from_slice(&self.sender.0);
+        buf.extend_from_slice(&self.next_hop.0);
     }
-}
-
-/// The neighbor that sent `frame`, if it's a control frame.
-///
-/// Every neighbor sends control frames regularly, so platforms on hues with
-/// link-layer addresses can use this to learn which address belongs to which
-/// node, and then unicast frames to [`Transmit::next_hop`].
-///
-/// [`Transmit::next_hop`]: crate::router::Transmit::next_hop
-pub fn control_sender(frame: &[u8]) -> Option<NodeId> {
-    match Frame::decode(frame) {
-        Ok(Frame::Control { src, .. }) => Some(src),
-        _ => None,
-    }
-}
-
-/// Starts a control frame. Append TLVs with [`Tlv::encode`].
-pub fn encode_control_header(src: NodeId, next_hop: NodeId, buf: &mut Vec<u8>) {
-    buf.push(VERSION << 4 | KIND_CONTROL);
-    buf.extend_from_slice(&src.0);
-    buf.extend_from_slice(&next_hop.0);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DataHeader {
-    pub src: NodeId,
-    pub next_hop: NodeId,
+    pub origin: NodeId,
     pub dst: NodeId,
     pub ttl: u8,
 }
 
 impl DataHeader {
     pub fn encode(&self, buf: &mut Vec<u8>) {
-        buf.push(VERSION << 4 | KIND_DATA);
-        buf.extend_from_slice(&self.src.0);
-        buf.extend_from_slice(&self.next_hop.0);
+        buf.extend_from_slice(&self.origin.0);
         buf.extend_from_slice(&self.dst.0);
         buf.push(self.ttl);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Trailer {
+    pub index: u32,
+    pub counter: u32,
+    pub tag: [u8; TAG_LEN],
+}
+
+impl Trailer {
+    /// Appends the boot index and counter: the part of the trailer the tag covers.
+    pub fn encode_signed_part(index: u32, counter: u32, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&index.to_be_bytes());
+        buf.extend_from_slice(&counter.to_be_bytes());
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Body<'a> {
+    Control(Tlvs<'a>),
+    Data {
+        header: DataHeader,
+        payload: &'a [u8],
+    },
+}
+
+/// A decoded frame. Nothing in it is authenticated until its tag is checked.
+#[derive(Clone, Debug)]
+pub struct Frame<'a> {
+    pub header: Header,
+    pub body: Body<'a>,
+    pub trailer: Trailer,
+    /// Everything the tag covers: the whole frame except the tag itself.
+    pub signed: &'a [u8],
+}
+
+impl<'a> Frame<'a> {
+    pub fn decode(frame: &'a [u8]) -> Result<Self> {
+        if frame.len() < CONTROL_OVERHEAD {
+            return Err(Error::Truncated);
+        }
+        let version = frame[0] >> 4;
+        if version != VERSION {
+            return Err(Error::UnsupportedVersion(version));
+        }
+        let kind = match frame[0] & 0x0f {
+            1 => FrameKind::Control,
+            2 => FrameKind::Data,
+            other => return Err(Error::UnknownFrameKind(other)),
+        };
+        let header = Header {
+            kind,
+            key_id: frame[1],
+            sender: node_at(frame, 2),
+            next_hop: node_at(frame, 10),
+        };
+
+        let (signed, tag) = frame.split_at(frame.len() - TAG_LEN);
+        let trailer_at = signed.len() - (TRAILER_LEN - TAG_LEN);
+        let trailer = Trailer {
+            index: u32_at(frame, trailer_at),
+            counter: u32_at(frame, trailer_at + 4),
+            tag: tag.try_into().expect("split at TAG_LEN"),
+        };
+
+        let body = &frame[HEADER_LEN..trailer_at];
+        let body = match kind {
+            FrameKind::Control => Body::Control(Tlvs(body)),
+            FrameKind::Data => {
+                if body.len() < DATA_HEADER_LEN {
+                    return Err(Error::Truncated);
+                }
+                Body::Data {
+                    header: DataHeader {
+                        origin: node_at(body, 0),
+                        dst: node_at(body, 8),
+                        ttl: body[16],
+                    },
+                    payload: &body[DATA_HEADER_LEN..],
+                }
+            }
+        };
+        Ok(Frame {
+            header,
+            body,
+            trailer,
+            signed,
+        })
     }
 }
 
@@ -163,6 +208,10 @@ pub enum Tlv {
         seqno: u16,
         hop_count: u8,
     },
+    /// "Prove this boot index is live: echo this nonce."
+    ChallengeRequest { nonce: u64 },
+    /// The echo of a [`Tlv::ChallengeRequest`] nonce.
+    ChallengeReply { nonce: u64 },
 }
 
 impl Tlv {
@@ -171,6 +220,8 @@ impl Tlv {
     const UPDATE: u8 = 3;
     const ROUTE_REQUEST: u8 = 4;
     const SEQNO_REQUEST: u8 = 5;
+    const CHALLENGE_REQUEST: u8 = 6;
+    const CHALLENGE_REPLY: u8 = 7;
 
     /// Bytes this TLV takes in a frame, including its type and length.
     pub fn encoded_len(&self) -> usize {
@@ -180,10 +231,11 @@ impl Tlv {
     fn body_len(&self) -> usize {
         match self {
             Tlv::Hello { .. } => 4,
-            Tlv::Ihu { .. } => 8,
-            Tlv::Update { .. } => 12,
-            Tlv::RouteRequest { .. } => 4,
-            Tlv::SeqnoRequest { .. } => 7,
+            Tlv::Ihu { .. } => 12,
+            Tlv::Update { .. } => 16,
+            Tlv::RouteRequest { .. } => 8,
+            Tlv::SeqnoRequest { .. } => 11,
+            Tlv::ChallengeRequest { .. } | Tlv::ChallengeReply { .. } => 8,
         }
     }
 
@@ -194,6 +246,8 @@ impl Tlv {
             Tlv::Update { .. } => Self::UPDATE,
             Tlv::RouteRequest { .. } => Self::ROUTE_REQUEST,
             Tlv::SeqnoRequest { .. } => Self::SEQNO_REQUEST,
+            Tlv::ChallengeRequest { .. } => Self::CHALLENGE_REQUEST,
+            Tlv::ChallengeReply { .. } => Self::CHALLENGE_REPLY,
         }
     }
 
@@ -235,6 +289,9 @@ impl Tlv {
                 buf.extend_from_slice(&seqno.to_be_bytes());
                 buf.push(hop_count);
             }
+            Tlv::ChallengeRequest { nonce } | Tlv::ChallengeReply { nonce } => {
+                buf.extend_from_slice(&nonce.to_be_bytes());
+            }
         }
     }
 
@@ -257,34 +314,46 @@ impl Tlv {
                 }
             }
             Self::IHU => {
-                need(8)?;
+                need(12)?;
                 Tlv::Ihu {
                     neighbor: node_at(body, 0),
-                    rxcost: u16_at(body, 4),
-                    interval: interval_at(body, 6),
-                }
-            }
-            Self::UPDATE => {
-                need(12)?;
-                Tlv::Update {
-                    dest: node_at(body, 0),
-                    seqno: u16_at(body, 4),
-                    metric: u32::from_be_bytes([body[6], body[7], body[8], body[9]]),
+                    rxcost: u16_at(body, 8),
                     interval: interval_at(body, 10),
                 }
             }
+            Self::UPDATE => {
+                need(16)?;
+                Tlv::Update {
+                    dest: node_at(body, 0),
+                    seqno: u16_at(body, 8),
+                    metric: u32_at(body, 10),
+                    interval: interval_at(body, 14),
+                }
+            }
             Self::ROUTE_REQUEST => {
-                need(4)?;
+                need(8)?;
                 Tlv::RouteRequest {
                     dest: node_at(body, 0),
                 }
             }
             Self::SEQNO_REQUEST => {
-                need(7)?;
+                need(11)?;
                 Tlv::SeqnoRequest {
                     dest: node_at(body, 0),
-                    seqno: u16_at(body, 4),
-                    hop_count: body[6],
+                    seqno: u16_at(body, 8),
+                    hop_count: body[10],
+                }
+            }
+            Self::CHALLENGE_REQUEST => {
+                need(8)?;
+                Tlv::ChallengeRequest {
+                    nonce: u64_at(body, 0),
+                }
+            }
+            Self::CHALLENGE_REPLY => {
+                need(8)?;
+                Tlv::ChallengeReply {
+                    nonce: u64_at(body, 0),
                 }
             }
             _ => return Ok(None),
@@ -327,11 +396,23 @@ impl Iterator for Tlvs<'_> {
 }
 
 fn node_at(buf: &[u8], at: usize) -> NodeId {
-    NodeId([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]])
+    NodeId(
+        buf[at..at + NodeId::LEN]
+            .try_into()
+            .expect("slice is 8 bytes"),
+    )
 }
 
 fn u16_at(buf: &[u8], at: usize) -> u16 {
     u16::from_be_bytes([buf[at], buf[at + 1]])
+}
+
+fn u32_at(buf: &[u8], at: usize) -> u32 {
+    u32::from_be_bytes(buf[at..at + 4].try_into().expect("slice is 4 bytes"))
+}
+
+fn u64_at(buf: &[u8], at: usize) -> u64 {
+    u64::from_be_bytes(buf[at..at + 8].try_into().expect("slice is 8 bytes"))
 }
 
 fn interval_at(buf: &[u8], at: usize) -> Duration {
@@ -348,21 +429,45 @@ mod tests {
     use super::*;
     use alloc::vec;
 
-    const A: NodeId = NodeId::from_u32(0x0102_0304);
-    const B: NodeId = NodeId::from_u32(0x0a0b_0c0d);
+    const A: NodeId = NodeId::from_u64(0x0102_0304_0506_0708);
+    const B: NodeId = NodeId::from_u64(0x0a0b_0c0d_0e0f_1011);
+
+    fn finish(mut frame: Vec<u8>) -> Vec<u8> {
+        Trailer::encode_signed_part(0xaabb_ccdd, 42, &mut frame);
+        frame.extend_from_slice(&[0x55; TAG_LEN]);
+        frame
+    }
+
+    fn header(kind: FrameKind, sender: NodeId, next_hop: NodeId) -> Vec<u8> {
+        let mut frame = Vec::new();
+        Header {
+            kind,
+            key_id: 9,
+            sender,
+            next_hop,
+        }
+        .encode(&mut frame);
+        frame
+    }
 
     fn control_frame(tlvs: &[Tlv]) -> Vec<u8> {
-        let mut frame = Vec::new();
-        encode_control_header(A, NodeId::BROADCAST, &mut frame);
+        let mut frame = header(FrameKind::Control, A, NodeId::BROADCAST);
         for tlv in tlvs {
             tlv.encode(&mut frame);
         }
-        frame
+        finish(frame)
+    }
+
+    fn tlvs(frame: &Frame<'_>) -> Vec<Tlv> {
+        let Body::Control(tlvs) = frame.body.clone() else {
+            panic!("expected a control frame");
+        };
+        tlvs.collect::<Result<_>>().unwrap()
     }
 
     #[test]
     fn control_frames_round_trip() {
-        let tlvs = [
+        let sent = [
             Tlv::Hello {
                 seqno: 7,
                 interval: Duration::from_secs(4),
@@ -386,21 +491,35 @@ mod tests {
                 seqno: 3,
                 hop_count: 16,
             },
+            Tlv::ChallengeRequest {
+                nonce: 0x0123_4567_89ab_cdef,
+            },
+            Tlv::ChallengeReply { nonce: 1 },
         ];
-        let frame = control_frame(&tlvs);
-        let expected_len = CONTROL_HEADER_LEN + tlvs.iter().map(Tlv::encoded_len).sum::<usize>();
-        assert_eq!(frame.len(), expected_len);
+        let bytes = control_frame(&sent);
+        let expected_len = CONTROL_OVERHEAD + sent.iter().map(Tlv::encoded_len).sum::<usize>();
+        assert_eq!(bytes.len(), expected_len);
 
-        let Frame::Control {
-            src,
-            next_hop,
-            tlvs: decoded,
-        } = Frame::decode(&frame).unwrap()
-        else {
-            panic!("expected a control frame");
-        };
-        assert_eq!((src, next_hop), (A, NodeId::BROADCAST));
-        assert_eq!(decoded.collect::<Result<Vec<_>>>().unwrap(), tlvs);
+        let frame = Frame::decode(&bytes).unwrap();
+        assert_eq!(
+            frame.header,
+            Header {
+                kind: FrameKind::Control,
+                key_id: 9,
+                sender: A,
+                next_hop: NodeId::BROADCAST,
+            }
+        );
+        assert_eq!(
+            frame.trailer,
+            Trailer {
+                index: 0xaabb_ccdd,
+                counter: 42,
+                tag: [0x55; TAG_LEN],
+            }
+        );
+        assert_eq!(frame.signed, &bytes[..bytes.len() - TAG_LEN]);
+        assert_eq!(tlvs(&frame), sent);
     }
 
     #[test]
@@ -409,25 +528,25 @@ mod tests {
             seqno: 1,
             interval: Duration::from_secs(4),
         };
-        let mut frame = control_frame(&[]);
+        let mut frame = header(FrameKind::Control, A, B);
         frame.extend_from_slice(&[200, 3, 0xaa, 0xbb, 0xcc]);
         hello.encode(&mut frame);
+        let frame = finish(frame);
 
-        let Frame::Control { tlvs, .. } = Frame::decode(&frame).unwrap() else {
-            panic!("expected a control frame");
-        };
-        assert_eq!(tlvs.collect::<Result<Vec<_>>>().unwrap(), vec![hello]);
+        assert_eq!(tlvs(&Frame::decode(&frame).unwrap()), vec![hello]);
     }
 
     #[test]
     fn bad_tlvs_are_reported() {
-        let mut truncated = control_frame(&[]);
-        truncated.extend_from_slice(&[Tlv::HELLO, 4, 0, 1]);
-        let mut short = control_frame(&[]);
-        short.extend_from_slice(&[Tlv::HELLO, 2, 0, 1]);
-
-        for (frame, err) in [(truncated, Error::Truncated), (short, Error::Malformed)] {
-            let Frame::Control { mut tlvs, .. } = Frame::decode(&frame).unwrap() else {
+        for (body, err) in [
+            (&[Tlv::HELLO, 4, 0, 1][..], Error::Truncated),
+            (&[Tlv::HELLO, 2, 0, 1][..], Error::Malformed),
+        ] {
+            let mut frame = header(FrameKind::Control, A, B);
+            frame.extend_from_slice(body);
+            let frame = finish(frame);
+            let decoded = Frame::decode(&frame).unwrap();
+            let Body::Control(mut tlvs) = decoded.body else {
                 panic!("expected a control frame");
             };
             assert_eq!(tlvs.next(), Some(Err(err)));
@@ -437,35 +556,36 @@ mod tests {
 
     #[test]
     fn data_frames_round_trip() {
-        let header = DataHeader {
-            src: A,
-            next_hop: B,
-            dst: NodeId::from_u32(9),
+        let data = DataHeader {
+            origin: A,
+            dst: NodeId::from_u64(9),
             ttl: 16,
         };
-        let mut frame = Vec::new();
-        header.encode(&mut frame);
-        assert_eq!(frame.len(), DATA_HEADER_LEN);
+        let mut frame = header(FrameKind::Data, B, A);
+        data.encode(&mut frame);
         frame.extend_from_slice(b"hi");
+        let frame = finish(frame);
+        assert_eq!(frame.len(), DATA_OVERHEAD + 2);
 
-        let Frame::Data {
-            header: decoded,
-            payload,
-        } = Frame::decode(&frame).unwrap()
-        else {
+        let decoded = Frame::decode(&frame).unwrap();
+        assert_eq!(decoded.header.sender, B);
+        let Body::Data { header, payload } = decoded.body else {
             panic!("expected a data frame");
         };
-        assert_eq!((decoded, payload), (header, &b"hi"[..]));
+        assert_eq!((header, payload), (data, &b"hi"[..]));
     }
 
     #[test]
     fn rejects_bad_headers() {
         let mut frame = control_frame(&[]);
-        assert!(matches!(Frame::decode(&frame[..8]), Err(Error::Truncated)));
-        frame[0] = 2 << 4 | KIND_CONTROL;
+        assert!(matches!(
+            Frame::decode(&frame[..CONTROL_OVERHEAD - 1]),
+            Err(Error::Truncated)
+        ));
+        frame[0] = 1 << 4 | FrameKind::Control as u8;
         assert!(matches!(
             Frame::decode(&frame),
-            Err(Error::UnsupportedVersion(2))
+            Err(Error::UnsupportedVersion(1))
         ));
         frame[0] = VERSION << 4 | 9;
         assert!(matches!(

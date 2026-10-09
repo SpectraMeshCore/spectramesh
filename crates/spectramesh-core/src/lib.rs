@@ -23,14 +23,21 @@
 //! takes, times how long one try takes on that hue. So routes prefer fast
 //! hues, use slower long-range hues where nothing else reaches, and can mix
 //! hues hop by hop.
+//!
+//! Every frame is authenticated with a key shared by the whole mesh, and
+//! replays are rejected ([`auth`]). Each node's ID is derived from its own key
+//! pairs ([`identity`]).
 
 #![no_std]
 #![forbid(unsafe_code)]
 
 extern crate alloc;
 
+pub mod auth;
+mod crypto;
 pub mod error;
 pub mod hue;
+pub mod identity;
 pub mod neighbor;
 pub mod node;
 pub mod packet;
@@ -38,8 +45,10 @@ pub mod router;
 pub mod routing;
 pub mod time;
 
+pub use auth::{KeyRing, MeshKey, MeshKeyError};
 pub use error::{Error, Result};
 pub use hue::{HueId, HueInfo, HueKind};
+pub use identity::{Identity, PublicIdentity};
 pub use node::NodeId;
 pub use router::{Config, Delivery, Router, Transmit};
 pub use routing::Route;

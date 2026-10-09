@@ -3,6 +3,7 @@
 
 mod config;
 mod daemon;
+mod keys;
 mod link;
 mod logger;
 
@@ -11,9 +12,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use log::{error, info};
-use spectramesh_core::{Config as RouterConfig, HueId, HueInfo, NodeId, Router};
+use spectramesh_core::{Config as RouterConfig, HueId, HueInfo, MeshKey, Router};
 
-use crate::config::{Config, USAGE};
+use crate::config::{Command, Config, USAGE};
 use crate::link::{Device, EthernetSocket, LENGTH_PREFIX_LEN};
 
 fn main() -> ExitCode {
@@ -23,7 +24,8 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let config = match config::parse(args) {
-        Ok(config) => config,
+        Ok(Command::Run(config)) => config,
+        Ok(Command::GenerateMeshKey) => return generate_mesh_key(),
         Err(err) => {
             eprintln!("spectrameshd: {err}\n\n{USAGE}");
             return ExitCode::from(2);
@@ -36,11 +38,37 @@ fn main() -> ExitCode {
     ExitCode::FAILURE
 }
 
+fn generate_mesh_key() -> ExitCode {
+    match keys::random_bytes() {
+        Ok(bytes) => {
+            println!("{}", MeshKey::from_bytes(bytes).to_text());
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("spectrameshd: no random numbers: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// Opens every hue and runs the daemon. Only returns on failure.
 fn run(config: Config) -> io::Error {
+    let identity = match keys::load_or_create_identity(&config.identity_file) {
+        Ok(identity) => identity,
+        Err(err) => return err,
+    };
+    let mesh_keys = match keys::load_mesh_keys(&config.mesh_key_file) {
+        Ok(keys) => keys,
+        Err(err) => return err,
+    };
+    // Fresh for every run; see `Router::new`.
+    let seed = match keys::random_bytes() {
+        Ok(seed) => seed,
+        Err(err) => return err,
+    };
+
     let mut hues = Vec::new();
     let mut infos = Vec::new();
-    let mut first_mac = None;
     for (index, spec) in config.hues.iter().enumerate() {
         let device = match Device::open(&spec.device) {
             Ok(device) => device,
@@ -61,7 +89,6 @@ fn run(config: Config) -> io::Error {
             u16::try_from(device.mtu.saturating_sub(LENGTH_PREFIX_LEN)).unwrap_or(u16::MAX)
         });
         infos.push(HueInfo::new(id, spec.kind, mtu, spec.bitrate_bps));
-        first_mac.get_or_insert(device.mac);
         hues.push(daemon::Hue {
             id,
             device: device.name,
@@ -69,12 +96,8 @@ fn run(config: Config) -> io::Error {
         });
     }
 
-    // Like the ESP32 firmware: the last four bytes of the first device's MAC.
-    let node_id = config.node_id.unwrap_or_else(|| {
-        let mac = first_mac.expect("config has at least one hue");
-        NodeId([mac[2], mac[3], mac[4], mac[5]])
-    });
-    let mut router = Router::new(node_id, RouterConfig::default());
+    let node_id = identity.node_id();
+    let mut router = Router::new(node_id, mesh_keys, RouterConfig::default(), seed);
     for info in infos {
         router.add_hue(info);
     }

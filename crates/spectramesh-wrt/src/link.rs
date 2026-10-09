@@ -32,7 +32,6 @@ pub const BROADCAST_MAC: Mac = [0xff; 6];
 pub struct Device {
     pub name: String,
     pub index: i32,
-    pub mac: Mac,
     pub mtu: usize,
 }
 
@@ -48,19 +47,9 @@ impl Device {
         Ok(Device {
             name: name.into(),
             index: read("ifindex")?.parse().map_err(|_| invalid("ifindex"))?,
-            mac: parse_mac(&read("address")?).ok_or_else(|| invalid("MAC address"))?,
             mtu: read("mtu")?.parse().map_err(|_| invalid("MTU"))?,
         })
     }
-}
-
-fn parse_mac(text: &str) -> Option<Mac> {
-    let mut mac = [0; 6];
-    let mut parts = text.split(':');
-    for byte in &mut mac {
-        *byte = u8::from_str_radix(parts.next()?, 16).ok()?;
-    }
-    parts.next().is_none().then_some(mac)
 }
 
 /// Adds the length prefix.
@@ -193,16 +182,5 @@ mod tests {
         assert_eq!(unwrap(&padded), Some(&b"hello"[..]));
         assert_eq!(unwrap(&padded[..5]), None);
         assert_eq!(unwrap(&[0]), None);
-    }
-
-    #[test]
-    fn parses_macs() {
-        assert_eq!(
-            parse_mac("7a:11:bf:55:32:73"),
-            Some([0x7a, 0x11, 0xbf, 0x55, 0x32, 0x73])
-        );
-        assert_eq!(parse_mac("7a:11:bf:55:32"), None);
-        assert_eq!(parse_mac("7a:11:bf:55:32:73:00"), None);
-        assert_eq!(parse_mac("not a mac"), None);
     }
 }

@@ -10,3 +10,9 @@ homepage.workspace = true
 readme = "README.md"
 keywords = ["mesh", "networking", "routing", "lora", "no-std"]
 categories = ["network-programming", "embedded", "no-std"]
+
+[dependencies]
+blake2 = { version = "0.11.0", default-features = false }
+ed25519-dalek = { version = "3.0.0", default-features = false }
+x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets"] }
+zeroize = { version = "1.9.1", default-features = false }

@@ -149,8 +149,8 @@ impl RouteTable {
 
     /// Entries for `dest`, as (neighbor, hue, entry).
     pub fn for_dest(&self, dest: NodeId) -> impl Iterator<Item = (NodeId, HueId, &RouteEntry)> {
-        let first = (dest, NodeId::from_u32(0), HueId(0));
-        let last = (dest, NodeId::from_u32(u32::MAX), HueId(u8::MAX));
+        let first = (dest, NodeId::from_u64(0), HueId(0));
+        let last = (dest, NodeId::from_u64(u64::MAX), HueId(u8::MAX));
         self.entries
             .range(first..=last)
             .map(|(&(_, neighbor, hue), entry)| (neighbor, hue, entry))
@@ -221,9 +221,9 @@ pub fn select(
 mod tests {
     use super::*;
 
-    const DEST: NodeId = NodeId::from_u32(9);
-    const B: NodeId = NodeId::from_u32(2);
-    const C: NodeId = NodeId::from_u32(3);
+    const DEST: NodeId = NodeId::from_u64(9);
+    const B: NodeId = NodeId::from_u64(2);
+    const C: NodeId = NodeId::from_u64(3);
     const WIFI: HueId = HueId(0);
     const SUB_GHZ: HueId = HueId(1);
     const NOW: Instant = Instant::from_millis(0);

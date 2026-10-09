@@ -206,6 +206,11 @@ impl NeighborTable {
             .or_insert_with(Neighbor::new)
     }
 
+    /// Forgets a neighbor, for example because it restarted. Returns true if it was known.
+    pub fn remove(&mut self, node: NodeId, hue: HueId) -> bool {
+        self.neighbors.remove(&(node, hue)).is_some()
+    }
+
     pub fn get(&self, node: NodeId, hue: HueId) -> Option<&Neighbor> {
         self.neighbors.get(&(node, hue))
     }
@@ -347,11 +352,11 @@ mod tests {
     #[test]
     fn quiet_neighbors_expire() {
         let mut table = NeighborTable::default();
-        table.record_hello(NodeId::from_u32(1), HueId(0), 0, INTERVAL, at(0));
-        table.record_hello(NodeId::from_u32(2), HueId(0), 0, INTERVAL, at(10));
+        table.record_hello(NodeId::from_u64(1), HueId(0), 0, INTERVAL, at(0));
+        table.record_hello(NodeId::from_u64(2), HueId(0), 0, INTERVAL, at(10));
 
         assert!(table.expire(at(20)));
         assert_eq!(table.len(), 1);
-        assert!(table.get(NodeId::from_u32(2), HueId(0)).is_some());
+        assert!(table.get(NodeId::from_u64(2), HueId(0)).is_some());
     }
 }

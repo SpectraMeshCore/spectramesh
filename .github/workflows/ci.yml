@@ -87,9 +87,6 @@ jobs:
           workspaces: crates/spectramesh-esp
       - run: cargo fmt --check
       - run: cargo clippy --locked -- -D warnings
+      # Built without a mesh key, so this firmware won't start. Each mesh
+      # builds its own, with SPECTRAMESH_MESH_KEY set.
       - run: cargo build --release --locked
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: spectramesh-esp-esp32c6
-          path: crates/spectramesh-esp/target/riscv32imac-unknown-none-elf/release/spectramesh-esp
-          if-no-files-found: error

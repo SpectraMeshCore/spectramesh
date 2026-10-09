@@ -10,16 +10,5 @@
 extern crate alloc;
 
 pub mod espnow;
+pub mod identity_store;
 pub mod mesh;
-
-use spectramesh_core::NodeId;
-
-/// This node's mesh address: the last four bytes of its Wi-Fi MAC address.
-///
-/// Espressif MACs differ in their last three bytes from device to device, so
-/// these are unique in practice.
-//
-// TODO: derive from a key pair stored in flash once packets are signed.
-pub fn node_id(mac: [u8; 6]) -> NodeId {
-    NodeId([mac[2], mac[3], mac[4], mac[5]])
-}

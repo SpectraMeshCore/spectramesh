@@ -12,11 +12,13 @@
 //!
 //! For example, `--hue eth1` or `--hue phy1-mesh0,kind=wifi,freq=5805,bitrate=100M`.
 
-use spectramesh_core::{HueKind, NodeId};
+use spectramesh_core::HueKind;
+use std::path::PathBuf;
 use std::time::Duration;
 
 pub const USAGE: &str = "\
-Usage: spectrameshd [OPTIONS] --hue DEVICE[,SETTING=VALUE...]...
+Usage: spectrameshd [OPTIONS] --mesh-key-file FILE --hue DEVICE[,SETTING=VALUE...]...
+       spectrameshd --generate-mesh-key
 
 Routes SpectraMesh traffic across the given network devices.
 
@@ -26,19 +28,30 @@ Options:
                             bitrate=BITS[k|M|G]        (default 1G for ethernet)
                             freq=MHZ                   (radio channel frequency)
                             mtu=BYTES                  (default: device MTU less 2)
-  --node-id ID            This node's ID, as 8 hex digits (default: from the
-                          first device's MAC address)
+  --mesh-key-file FILE    The mesh keys, one per line. The first is sent with;
+                          any others are also accepted, while keys are changed.
+  --identity FILE         This node's secret key, created on first run
+                          (default /etc/spectramesh/node.key)
   --report-interval SECS  How often to log neighbors and routes (default 30)
   -v, --verbose           Log debug messages
+  --generate-mesh-key     Print a new random mesh key and exit
   -h, --help              Show this help
 
 Example:
-  spectrameshd --hue eth1 --hue phy1-mesh0,kind=wifi,freq=5805,bitrate=100M
+  spectrameshd --generate-mesh-key > /etc/spectramesh/mesh.key
+  spectrameshd --mesh-key-file /etc/spectramesh/mesh.key --hue eth1
 ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Command {
+    Run(Config),
+    GenerateMeshKey,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
-    pub node_id: Option<NodeId>,
+    pub identity_file: PathBuf,
+    pub mesh_key_file: PathBuf,
     pub hues: Vec<HueSpec>,
     pub report_interval: Duration,
     pub verbose: bool,
@@ -54,34 +67,47 @@ pub struct HueSpec {
 }
 
 /// Parses command-line arguments, not including the program name.
-pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Config, String> {
-    let mut config = Config {
-        node_id: None,
-        hues: Vec::new(),
-        report_interval: Duration::from_secs(30),
-        verbose: false,
-    };
+pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> {
+    let mut identity_file = PathBuf::from("/etc/spectramesh/node.key");
+    let mut mesh_key_file = None;
+    let mut hues = Vec::new();
+    let mut report_interval = Duration::from_secs(30);
+    let mut verbose = false;
+    let mut generate = false;
+
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
         match arg.as_str() {
-            "--hue" => config.hues.push(parse_hue(&value("--hue")?)?),
-            "--node-id" => config.node_id = Some(parse_node_id(&value("--node-id")?)?),
+            "--hue" => hues.push(parse_hue(&value("--hue")?)?),
+            "--mesh-key-file" => mesh_key_file = Some(value("--mesh-key-file")?.into()),
+            "--identity" => identity_file = value("--identity")?.into(),
+            "--generate-mesh-key" => generate = true,
             "--report-interval" => {
                 let secs = value("--report-interval")?;
                 let secs: u64 = secs
                     .parse()
                     .map_err(|_| format!("invalid report interval {secs:?}"))?;
-                config.report_interval = Duration::from_secs(secs.max(1));
+                report_interval = Duration::from_secs(secs.max(1));
             }
-            "-v" | "--verbose" => config.verbose = true,
+            "-v" | "--verbose" => verbose = true,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
-    if config.hues.is_empty() {
+    if generate {
+        return Ok(Command::GenerateMeshKey);
+    }
+    if hues.is_empty() {
         return Err("at least one --hue is needed".into());
     }
-    Ok(config)
+    let mesh_key_file = mesh_key_file.ok_or("--mesh-key-file is needed")?;
+    Ok(Command::Run(Config {
+        identity_file,
+        mesh_key_file,
+        hues,
+        report_interval,
+        verbose,
+    }))
 }
 
 fn parse_hue(spec: &str) -> Result<HueSpec, String> {
@@ -149,32 +175,27 @@ fn parse_number<T: std::str::FromStr>(key: &str, value: &str) -> Result<T, Strin
         .map_err(|_| format!("invalid {key} {value:?}"))
 }
 
-/// Accepts the form nodes are printed in, `!a1b2c3d4`, or the hex digits alone.
-fn parse_node_id(value: &str) -> Result<NodeId, String> {
-    let hex = value.strip_prefix('!').unwrap_or(value);
-    match u32::from_str_radix(hex, 16) {
-        Ok(id) if hex.len() == 8 && id != u32::MAX => Ok(NodeId::from_u32(id)),
-        _ => Err(format!("invalid node ID {value:?}; expected 8 hex digits")),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse_str(args: &str) -> Result<Config, String> {
-        parse(args.split_whitespace().map(String::from))
+        match parse(args.split_whitespace().map(String::from))? {
+            Command::Run(config) => Ok(config),
+            Command::GenerateMeshKey => Err("generate".into()),
+        }
     }
 
     #[test]
     fn parses_a_full_command_line() {
         let config = parse_str(
             "--hue eth1 --hue phy1-mesh0,kind=wifi,freq=5805,bitrate=100M \
-             --hue wlan2,kind=halow,bitrate=2M,mtu=1000 --node-id !0000002a \
-             --report-interval 5 -v",
+             --hue wlan2,kind=halow,bitrate=2M,mtu=1000 --mesh-key-file /tmp/mesh.key \
+             --identity /tmp/node.key --report-interval 5 -v",
         )
         .unwrap();
-        assert_eq!(config.node_id, Some(NodeId::from_u32(42)));
+        assert_eq!(config.mesh_key_file, PathBuf::from("/tmp/mesh.key"));
+        assert_eq!(config.identity_file, PathBuf::from("/tmp/node.key"));
         assert_eq!(config.report_interval, Duration::from_secs(5));
         assert!(config.verbose);
         assert_eq!(
@@ -203,8 +224,16 @@ mod tests {
     }
 
     #[test]
+    fn generating_a_key_needs_nothing_else() {
+        assert_eq!(
+            parse(["--generate-mesh-key".to_string()]),
+            Ok(Command::GenerateMeshKey)
+        );
+    }
+
+    #[test]
     fn handles_fast_fiber() {
-        let config = parse_str("--hue sfp0,bitrate=10G").unwrap();
+        let config = parse_str("--hue sfp0,bitrate=10G --mesh-key-file k").unwrap();
         assert_eq!(config.hues[0].bitrate_bps, 10_000_000_000);
     }
 
@@ -218,7 +247,7 @@ mod tests {
             ("--hue eth0,bitrate=fast", "invalid bitrate"),
             ("--hue eth0,kind=lora", "unknown kind"),
             ("--hue kind=wifi", "must start with a device name"),
-            ("--hue eth0 --node-id 42", "invalid node ID"),
+            ("--hue eth0", "--mesh-key-file is needed"),
             ("--hue eth0 --frobnicate", "unknown argument"),
         ] {
             let err = parse_str(args).unwrap_err();

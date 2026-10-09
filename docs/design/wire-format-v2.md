@@ -9,7 +9,7 @@ SpectraMesh v1 has no security: anyone in radio range can read traffic, inject r
 - **Identity.** Each node has its own key pair, created on first boot. Its node ID is derived from its public keys, so nobody can claim an ID without holding the matching private key. IDs grow from 4 to **8 bytes**.
 - **Layer 1: link authentication**, hop by hop. Every frame carries a short tag computed with the shared **mesh key**, plus a counter. Outsiders can't inject or replay anything, and relays drop forged traffic before forwarding it. This follows Babel's own authentication design (RFC 8967).
 - **Layer 2: end-to-end encryption** for data. Two nodes set up a session with a Noise handshake, the pattern WireGuard uses, so relays and other mesh members can't read their traffic.
-- **Cost:** a data frame's overhead grows from 14 bytes to 65. That still leaves 185 bytes of payload in a 250-byte ESP-NOW frame, and 1,433 bytes on Ethernet.
+- **Cost:** a data frame's overhead grows from 14 bytes to 77. That still leaves 173 bytes of payload in a 250-byte ESP-NOW frame, and 1,421 bytes on Ethernet.
 
 The [decisions](#decisions) at the end record the choices made.
 
@@ -90,12 +90,13 @@ Every node caches identities it has seen, up to a size limit, so popular nodes a
 
 ## Layer 1: link authentication
 
-This layer stops outsiders. Every frame on every hue carries a trailer:
+This layer stops outsiders. Every frame on every hue carries a 16-byte trailer:
 
 | Field | Size | Contents |
 |---|---|---|
+| Boot index | 4 bytes | Random, chosen each time the sender starts |
 | Counter | 4 bytes | Increases with every frame the sender sends, on any hue |
-| Tag | 8 bytes | Keyed BLAKE2s over the sender's boot index, the whole frame and the counter, truncated to 8 bytes |
+| Tag | 8 bytes | Keyed BLAKE2s over the whole frame before it, truncated to 8 bytes |
 
 The tag key is derived from the mesh key: `BLAKE2s(mesh key, "SpectraMesh link v1")`.
 
@@ -107,9 +108,12 @@ The tag key is derived from the mesh key: `BLAKE2s(mesh key, "SpectraMesh link v
 
 This follows RFC 8967, Babel's authentication extension:
 
-- Each node picks a random 8-byte **boot index** whenever it starts, and announces it in its hellos. Tags cover the index, so frames from an earlier boot fail to verify.
-- Receivers remember each neighbor's index and highest counter, and drop any frame whose counter isn't higher.
-- When a neighbor appears with a new index, the receiver sends a **ChallengeRequest** with a random nonce. The neighbor echoes it in a **ChallengeReply**, which proves the new index is live and not a recording. Until then, its frames don't count towards link quality.
+- Each node picks a random 4-byte **boot index** whenever it starts, and puts it in every frame's trailer.
+- Receivers remember each neighbor's index and the counters it has used recently, on each hue, and drop any frame they've seen before. A window of the last 64 counters lets frames arrive slightly out of order.
+- When a frame arrives with an index the receiver doesn't know, the receiver drops it and sends a **ChallengeRequest** with a random nonce. The neighbor echoes it in a **ChallengeReply**, which proves the new index is live and not a recording. Two nodes meeting for the first time challenge each other.
+- Once verified, the receiver says hello, sends its routes, and asks the neighbor for its routes, in case the neighbor dropped this node's frames before verifying it in turn. A new index also means the neighbor restarted, so its hello history is reset.
+
+A recording can only be replayed if a node later picks the same boot index again: for each restart, about one chance in four billion per recorded boot.
 
 This avoids writing counters to flash, which would wear it out on ESP32.
 
@@ -165,10 +169,10 @@ Link authentication keeps outsiders out of routing entirely. Against a member:
 |---|---|
 | 0 | Version `2` (high 4 bits), frame kind (low 4 bits) |
 | 1 | Mesh key ID |
-| 2..10 | Source node ID |
+| 2..10 | Sender: the node that transmitted this frame |
 | 10..18 | Next hop node ID, or broadcast |
 
-Every frame ends with the 12-byte [trailer](#layer-1-link-authentication): a counter and a tag.
+Every frame ends with the 16-byte [trailer](#layer-1-link-authentication): the boot index, a counter and a tag.
 
 ### Control frames
 
@@ -176,7 +180,6 @@ The common header, then TLVs, then the trailer. Changes from v1:
 
 | TLV | Change |
 |---|---|
-| Hello | Adds the 8-byte boot index |
 | IHU, Update, RouteRequest, SeqnoRequest | Node IDs grow to 8 bytes |
 | **ChallengeRequest**, **ChallengeReply** | New: 8-byte nonce |
 | **IdentityRequest**, **Identity** | New: node ID, then 64 bytes of public keys |
@@ -187,10 +190,13 @@ The common header, then TLVs, then the trailer. Changes from v1:
 | Bytes | Field |
 |---|---|
 | 0..18 | Common header |
-| 18..26 | Destination node ID |
-| 26 | TTL |
-| 27.. | End-to-end payload: epoch (1), counter (8), ciphertext, tag (16) |
-| last 12 | Trailer |
+| 18..26 | Origin: the node that created the packet |
+| 26..34 | Destination node ID |
+| 34 | TTL |
+| 35.. | End-to-end payload: epoch (1), counter (8), ciphertext, tag (16) |
+| last 16 | Trailer |
+
+The header's sender changes at every hop, and is what the trailer is checked against. The origin stays the same end to end.
 
 Noise handshake messages travel as data frames, with their own payload kind.
 
@@ -198,14 +204,14 @@ Noise handshake messages travel as data frames, with their own payload kind.
 
 | | v1 | v2 |
 |---|---|---|
-| Hello frame | 15 bytes | 44 bytes |
-| Data overhead per frame | 14 bytes | 65 bytes |
-| Payload in a 250-byte ESP-NOW v1 frame | 236 | **185** |
-| Payload in a 255-byte sub-GHz FSK frame | 241 | **190** |
-| Payload in a 1,470-byte ESP-NOW v2 frame | 1,456 | **1,405** |
-| Payload on Ethernet (1,498 bytes) | 1,484 | **1,433** |
+| Hello frame | 15 bytes | 40 bytes |
+| Data overhead per frame | 14 bytes | 77 bytes (51 until phase 2 adds end-to-end encryption) |
+| Payload in a 250-byte ESP-NOW v1 frame | 236 | **173** |
+| Payload in a 255-byte sub-GHz FSK frame | 241 | **178** |
+| Payload in a 1,470-byte ESP-NOW v2 frame | 1,456 | **1,393** |
+| Payload on Ethernet (1,498 bytes) | 1,484 | **1,421** |
 
-On a 250 kbit/s link with 10-second hellos, the extra 29 bytes per hello is about 1 ms of airtime every 10 seconds.
+On a 250 kbit/s link with 10-second hellos, the extra 25 bytes per hello is under 1 ms of airtime every 10 seconds.
 
 ## IP addressing
 
@@ -239,6 +245,15 @@ A packet to that address routes straight to the node, with no address assignment
 | **3. Routing integrity and groups** | Signed seqnos, group keys for broadcast, key rotation tools | Members can't hijack other nodes' routes; secure channels |
 
 Phase 1 changes every frame, so all nodes must be upgraded together. There are no deployed nodes yet, so this is the moment to do it.
+
+## Changes during phase 1
+
+Implementing phase 1 showed two gaps in the original draft:
+
+1. **Data frames need an origin as well as a sender.** Trailers have to be checked against the node that transmitted a frame, but a data frame's source was the node that created it, possibly hops away. Data frames now carry both, which costs 8 bytes.
+2. **The boot index belongs in every frame, not only in hellos.** Otherwise a node couldn't check frames from a neighbor that arrived before that neighbor's next hello. Moving the index into the trailer makes every frame checkable on its own, and verification identical for every frame. It costs 4 bytes per frame, offset by using a 4-byte index instead of 8.
+
+Overheads above include both changes.
 
 ## Decisions
 

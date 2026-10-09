@@ -32,14 +32,28 @@ Ethernet, fiber and IP hues use the **reliable** link model, as Babel does for w
 
 So cabled nodes always route over the cable where it reaches, a single dropped hello never moves traffic, and a cut cable is noticed within about 10 seconds, after which traffic falls back to radio.
 
-On switched networks, the platform can unicast instead of broadcasting: every frame the router hands back names its next hop, and `packet::control_sender` tells the platform which link-layer address belongs to which node.
+On switched networks, the platform can unicast instead of broadcasting: every frame the router hands back names its next hop, and `handle_frame` returns the sender of every frame it accepts, so the platform learns which link-layer address belongs to which node.
+
+## Security
+
+Phase 1 of the [security design](../../docs/design/wire-format-v2.md) is in place:
+
+- **Node IDs come from keys.** Each node keeps a 32-byte secret, from which it derives Ed25519 and X25519 key pairs. Its 8-byte node ID is the start of a hash of the public keys, so claiming another node's ID means finding keys that hash to it ([`identity.rs`](src/identity.rs)).
+- **Every frame is authenticated** with an 8-byte tag keyed with the shared mesh key. Nodes without the key can't inject or alter anything ([`auth.rs`](src/auth.rs)).
+- **Replays are rejected.** Each frame carries the sender's random boot index and a counter. A neighbor with an unknown boot index must answer a challenge before its frames count.
+- **Keys can change without downtime.** A node can accept several mesh keys while sending with one.
+
+End-to-end encryption between nodes is phase 2.
 
 ## Using it
 
 ```rust
-use spectramesh_core::{Config, HueId, HueInfo, HueKind, Instant, NodeId, Router};
+use spectramesh_core::{Config, HueId, HueInfo, HueKind, Identity, KeyRing, MeshKey, Router};
 
-let mut router = Router::new(NodeId::from_u32(0x1234_5678), Config::default());
+// Stored secrets, and 32 fresh random bytes on every start.
+let identity = Identity::from_secret(stored_secret);
+let mesh_key = MeshKey::from_text("smk1-...")?;
+let mut router = Router::new(identity.node_id(), KeyRing::new(&mesh_key), Config::default(), random_seed);
 // Timers are picked from the bitrate; change the fields to override them.
 router.add_hue(HueInfo::new(HueId(0), HueKind::Wifi { freq_mhz: 2437 }, 1400, 20_000_000));
 router.add_hue(HueInfo::new(HueId(1), HueKind::Fsk { freq_khz: 915_000 }, 255, 250_000));
@@ -54,12 +68,12 @@ router.add_hue(HueInfo::new(HueId(2), HueKind::Ethernet, 1500, 1_000_000_000));
 
 ## Wire format
 
-A 9-byte common header (version and frame kind, source, next hop), then:
+Version 2: an 18-byte header (version and frame kind, mesh key ID, sender, next hop), a body, and a 16-byte trailer (boot index, counter, tag):
 
-- **Control frames**: Babel-style TLVs (hello, IHU, update, route request, seqno request), several per frame.
-- **Data frames**: destination and TTL, then the payload. 14 bytes of header in all.
+- **Control frames**: Babel-style TLVs (hello, IHU, update, route and seqno requests, challenges), several per frame.
+- **Data frames**: origin, destination and TTL, then the payload. 51 bytes of overhead in all.
 
-See [`packet.rs`](src/packet.rs). The format is SpectraMesh's own, smaller than Babel's, so it doesn't exchange routes with `babeld`.
+See [`packet.rs`](src/packet.rs) and the [design document](../../docs/design/wire-format-v2.md). The format is SpectraMesh's own, so it doesn't exchange routes with `babeld`.
 
 ## Not done yet
 
@@ -71,4 +85,4 @@ Each is marked with a `TODO` in the code.
 - Split horizon on wired hues, to send smaller updates on switched networks
 - Telling 1 Gbit/s from 10 Gbit/s links apart (both cost 1)
 - Mesh-wide broadcast (today, broadcast reaches direct neighbors only)
-- Signing, encryption, and node IDs derived from public keys
+- End-to-end encryption, and signed seqnos (phases 2 and 3 of the security design)
