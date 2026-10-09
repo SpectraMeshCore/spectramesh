@@ -30,6 +30,16 @@ pub enum Error {
     /// challenge yet, so it could be a recording. Routine when a neighbor
     /// appears or restarts.
     Unverified,
+    /// An end-to-end message type this version doesn't know.
+    UnknownMessage(u8),
+    /// A handshake message didn't verify, or its keys don't match the node
+    /// ID it claims to come from.
+    BadHandshake,
+    /// An end-to-end message didn't decrypt: altered, or for another session.
+    BadCiphertext,
+    /// An end-to-end message for a session this node doesn't have, perhaps
+    /// because it expired or the node restarted.
+    NoSession,
 }
 
 impl fmt::Display for Error {
@@ -45,6 +55,10 @@ impl fmt::Display for Error {
             Error::BadTag => f.write_str("frame tag doesn't verify with any mesh key"),
             Error::Replay => f.write_str("frame was already received"),
             Error::Unverified => f.write_str("sender not yet verified; challenge sent"),
+            Error::UnknownMessage(k) => write!(f, "unknown end-to-end message type {k}"),
+            Error::BadHandshake => f.write_str("handshake failed or doesn't match its node ID"),
+            Error::BadCiphertext => f.write_str("end-to-end message didn't decrypt"),
+            Error::NoSession => f.write_str("no session for end-to-end message"),
         }
     }
 }

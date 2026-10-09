@@ -72,12 +72,12 @@ pub fn load_or_create_identity(path: &Path) -> io::Result<Identity> {
 
 /// Reads mesh keys from `path`, one per line. The first is the key frames
 /// are sent with; any others are accepted too. Blank lines and lines starting
-/// with `#` are ignored.
-pub fn load_mesh_keys(path: &Path) -> io::Result<KeyRing> {
+/// with `#` are ignored. Also returns the IPv6 prefix the first key implies.
+pub fn load_mesh_keys(path: &Path) -> io::Result<(KeyRing, [u8; 8])> {
     let text = fs::read_to_string(path)
         .map_err(|err| io::Error::new(err.kind(), format!("{}: {err}", path.display())))?;
     warn_if_readable_by_others(path);
-    let mut ring: Option<KeyRing> = None;
+    let mut ring: Option<(KeyRing, [u8; 8])> = None;
     for (number, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -90,8 +90,8 @@ pub fn load_mesh_keys(path: &Path) -> io::Result<KeyRing> {
             )
         })?;
         match &mut ring {
-            Some(ring) => ring.accept(&key),
-            None => ring = Some(KeyRing::new(&key)),
+            Some((ring, _)) => ring.accept(&key),
+            None => ring = Some((KeyRing::new(&key), key.ipv6_prefix())),
         }
     }
     ring.ok_or_else(|| {
@@ -161,8 +161,9 @@ mod tests {
             format!("# current\n{}\n\n{}\n", a.to_text(), b.to_text()),
         )
         .unwrap();
-        let ring = load_mesh_keys(&path).unwrap();
+        let (ring, prefix) = load_mesh_keys(&path).unwrap();
         assert_eq!(ring.current_id(), a.id());
+        assert_eq!(prefix, a.ipv6_prefix());
 
         fs::write(&path, "# nothing here\n").unwrap();
         assert!(

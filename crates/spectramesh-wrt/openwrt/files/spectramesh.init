@@ -47,6 +47,10 @@ start_service() {
 	procd_set_param command "$PROG" --mesh-key-file "$KEY_FILE"
 	config_get identity main identity /etc/spectramesh/node.key
 	procd_append_param command --identity "$identity"
+	config_get tun main tun
+	[ -n "$tun" ] && procd_append_param command --tun "$tun"
+	config_get ipv6_prefix main ipv6_prefix
+	[ -n "$ipv6_prefix" ] && procd_append_param command --ipv6-prefix "$ipv6_prefix"
 	config_foreach add_hue hue
 	procd_set_param respawn
 	procd_set_param stdout 1

@@ -43,6 +43,7 @@ pub mod node;
 pub mod packet;
 pub mod router;
 pub mod routing;
+pub mod session;
 pub mod time;
 
 pub use auth::{KeyRing, MeshKey, MeshKeyError};
@@ -52,4 +53,5 @@ pub use identity::{Identity, PublicIdentity};
 pub use node::NodeId;
 pub use router::{Config, Delivery, Router, Transmit};
 pub use routing::Route;
+pub use session::TRANSPORT_OVERHEAD;
 pub use time::Instant;

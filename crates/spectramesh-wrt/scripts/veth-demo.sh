@@ -1,13 +1,17 @@
 #!/bin/sh
-# Runs spectrameshd nodes joined by virtual Ethernet cables, in a throwaway
-# network namespace:
+# Runs spectrameshd nodes, each in its own network namespace, joined by
+# virtual Ethernet cables:
 #
 #   node 1 [a0] ---- [b0] node 2 [b1] ---- [c1] node 3
 #                         node 2 [b2] ---- [d2] node 4 (outsider: wrong mesh key)
 #
-# Nodes 1 and 3 can only reach each other through node 2. Node 4 is plugged in
-# but has a different mesh key, so node 2 drops everything it sends. Needs no
-# root, only unprivileged user namespaces (enabled on most Linux distributions).
+# Nodes 1 and 3 can only reach each other through node 2. Each member node
+# carries IPv6 through a TUN device, and node 1 pings node 3's mesh address;
+# the packets cross node 2 encrypted end to end. Node 4 has a different mesh
+# key, so node 2 drops everything it sends.
+#
+# Needs no root, only unprivileged user namespaces (enabled on most Linux
+# distributions).
 #
 # Usage: veth-demo.sh [SECONDS]   (default 15)
 # Set SPECTRAMESHD to use a binary other than the workspace's debug build.
@@ -20,32 +24,67 @@ if [ ! -x "$bin" ]; then
 	exit 1
 fi
 
-keys=$(mktemp -d)
-trap 'rm -rf "$keys"' EXIT
-(umask 077 && "$bin" --generate-mesh-key >"$keys/mesh.key" && "$bin" --generate-mesh-key >"$keys/other.key")
+dir=$(mktemp -d)
+trap 'rm -rf "$dir"' EXIT
+(umask 077 && "$bin" --generate-mesh-key >"$dir/mesh.key" && "$bin" --generate-mesh-key >"$dir/other.key")
+# Create node 3's identity now, so node 1 knows which address to ping.
+target=$("$bin" --node-info --identity "$dir/node 3.id" --mesh-key-file "$dir/mesh.key" |
+	sed -n 's/^IPv6 address: *//p')
 
-# Inside the namespace: show its own devices in /sys, wire up the veth pairs,
-# run the nodes, then stop them.
-unshare --user --map-root-user --net --mount sh -eu -c '
-	bin=$1 seconds=$2 keys=$3
-	mount -t sysfs sysfs /sys
-	ip link add a0 type veth peer name b0
-	ip link add b1 type veth peer name c1
-	ip link add b2 type veth peer name d2
-	for dev in a0 b0 b1 c1 b2 d2; do ip link set "$dev" up; done
+unshare --user --map-root-user --net sh -eu -c '
+	bin=$1 dir=$2 seconds=$3 target=$4
 
+	# Starts a node in a network namespace of its own. It waits for its
+	# cables, then runs the daemon, and pings `ping` if that is set.
 	node() {
-		name=$1 key=$2
-		shift 2
-		"$bin" --identity "$keys/$name.id" --mesh-key-file "$keys/$key" \
-			--report-interval "$((seconds - 1))" "$@" 2>&1 | sed "s/^/[$name] /" &
+		name=$1 key=$2 ping=$3
+		shift 3
+		unshare --net --mount sh -eu -c "
+			name=\$1 bin=\$2 dir=\$3 key=\$4 seconds=\$5 ping=\$6
+			shift 6
+			mount -t sysfs sysfs /sys
+			ip link set lo up
+			hues=
+			for dev in \"\$@\"; do
+				while [ ! -e /sys/class/net/\$dev ]; do sleep 0.1; done
+				ip link set \$dev up
+				hues=\"\$hues --hue \$dev\"
+			done
+			\"\$bin\" --identity \"\$dir/\$name.id\" --mesh-key-file \"\$dir/\$key\" --tun smesh0 \
+				--report-interval \$((seconds - 1)) \$hues 2>&1 | sed \"s/^/[\$name] /\" &
+			if [ -n \"\$ping\" ]; then
+				sleep \$((seconds - 5))
+				ping -6 -c 3 -W 2 \$ping 2>&1 | sed \"s/^/[\$name ping] /\" || true
+			fi
+			wait
+		" node "$name" "$bin" "$dir" "$key" "$seconds" "$ping" "$@" &
+		pids="${pids:+$pids,}$!"
+		eval "pid_$(echo "$name" | tr -d " ")=$!"
 	}
-	node "node 1" mesh.key --hue a0
-	node "node 2" mesh.key --hue b0 --hue b1 --hue b2
-	node "node 3" mesh.key --hue c1
-	node "node 4" other.key --hue d2
+	pids=
+	# If anything below fails, stop the nodes rather than leave them waiting.
+	trap '"'"'[ -z "$pids" ] || kill $(echo "$pids" | tr , " ") 2>/dev/null'"'"' EXIT
+	node "node 1" mesh.key "$target" a0
+	node "node 2" mesh.key "" b0 b1 b2
+	node "node 3" mesh.key "" c1
+	node "node 4" other.key "" d2
+
+	# Wait for each node to be in its own namespace, then plug in the cables.
+	here=$(readlink /proc/self/ns/net)
+	for pid in $(echo "$pids" | tr , " "); do
+		while [ "$(readlink /proc/$pid/ns/net)" = "$here" ]; do sleep 0.1; done
+	done
+	cable() {
+		ip link add "$1" type veth peer name "$3"
+		ip link set "$1" netns "$2"
+		ip link set "$3" netns "$4"
+	}
+	cable a0 "$pid_node1" b0 "$pid_node2"
+	cable b1 "$pid_node2" c1 "$pid_node3"
+	cable b2 "$pid_node2" d2 "$pid_node4"
 
 	sleep "$seconds"
-	pkill -x spectrameshd
+	pkill -x -P "$pids" spectrameshd || true
 	wait
-' demo "$bin" "$seconds" "$keys"
+	pids=
+' demo "$bin" "$dir" "$seconds" "$target"

@@ -19,6 +19,7 @@ use std::time::Duration;
 pub const USAGE: &str = "\
 Usage: spectrameshd [OPTIONS] --mesh-key-file FILE --hue DEVICE[,SETTING=VALUE...]...
        spectrameshd --generate-mesh-key
+       spectrameshd --node-info [--identity FILE] [--mesh-key-file FILE]
 
 Routes SpectraMesh traffic across the given network devices.
 
@@ -32,9 +33,14 @@ Options:
                           any others are also accepted, while keys are changed.
   --identity FILE         This node's secret key, created on first run
                           (default /etc/spectramesh/node.key)
+  --tun NAME              Carry IPv6 over the mesh through TUN device NAME,
+                          with this node's address on it
+  --ipv6-prefix PREFIX    The mesh's /64, such as fd12:3456:789a:: (default:
+                          derived from the first mesh key)
   --report-interval SECS  How often to log neighbors and routes (default 30)
   -v, --verbose           Log debug messages
   --generate-mesh-key     Print a new random mesh key and exit
+  --node-info             Print this node's ID and IPv6 address and exit
   -h, --help              Show this help
 
 Example:
@@ -46,6 +52,11 @@ Example:
 pub enum Command {
     Run(Config),
     GenerateMeshKey,
+    NodeInfo {
+        identity_file: PathBuf,
+        mesh_key_file: Option<PathBuf>,
+        ipv6_prefix: Option<[u8; 8]>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +64,8 @@ pub struct Config {
     pub identity_file: PathBuf,
     pub mesh_key_file: PathBuf,
     pub hues: Vec<HueSpec>,
+    pub tun: Option<String>,
+    pub ipv6_prefix: Option<[u8; 8]>,
     pub report_interval: Duration,
     pub verbose: bool,
 }
@@ -74,6 +87,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     let mut report_interval = Duration::from_secs(30);
     let mut verbose = false;
     let mut generate = false;
+    let mut node_info = false;
+    let mut tun = None;
+    let mut ipv6_prefix = None;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -83,6 +99,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
             "--mesh-key-file" => mesh_key_file = Some(value("--mesh-key-file")?.into()),
             "--identity" => identity_file = value("--identity")?.into(),
             "--generate-mesh-key" => generate = true,
+            "--node-info" => node_info = true,
+            "--tun" => tun = Some(value("--tun")?),
+            "--ipv6-prefix" => ipv6_prefix = Some(parse_prefix(&value("--ipv6-prefix")?)?),
             "--report-interval" => {
                 let secs = value("--report-interval")?;
                 let secs: u64 = secs
@@ -97,6 +116,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     if generate {
         return Ok(Command::GenerateMeshKey);
     }
+    if node_info {
+        return Ok(Command::NodeInfo {
+            identity_file,
+            mesh_key_file,
+            ipv6_prefix,
+        });
+    }
     if hues.is_empty() {
         return Err("at least one --hue is needed".into());
     }
@@ -105,9 +131,26 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
         identity_file,
         mesh_key_file,
         hues,
+        tun,
+        ipv6_prefix,
         report_interval,
         verbose,
     }))
+}
+
+/// A `/64` written as an IPv6 address, optionally followed by `/64`.
+fn parse_prefix(text: &str) -> Result<[u8; 8], String> {
+    let address = text.strip_suffix("/64").unwrap_or(text);
+    let address: std::net::Ipv6Addr = address
+        .parse()
+        .map_err(|_| format!("invalid IPv6 prefix {text:?}"))?;
+    let octets = address.octets();
+    if octets[8..] != [0; 8] {
+        return Err(format!(
+            "IPv6 prefix {text:?} must be a /64, like fd12:3456:789a::"
+        ));
+    }
+    Ok(octets[..8].try_into().expect("8 bytes"))
 }
 
 fn parse_hue(spec: &str) -> Result<HueSpec, String> {
@@ -182,7 +225,7 @@ mod tests {
     fn parse_str(args: &str) -> Result<Config, String> {
         match parse(args.split_whitespace().map(String::from))? {
             Command::Run(config) => Ok(config),
-            Command::GenerateMeshKey => Err("generate".into()),
+            other => Err(format!("{other:?}")),
         }
     }
 
@@ -229,6 +272,21 @@ mod tests {
             parse(["--generate-mesh-key".to_string()]),
             Ok(Command::GenerateMeshKey)
         );
+    }
+
+    #[test]
+    fn parses_ip_options() {
+        let config = parse_str(
+            "--hue eth0 --mesh-key-file k --tun smesh0 --ipv6-prefix fd12:3456:789a::/64",
+        )
+        .unwrap();
+        assert_eq!(config.tun.as_deref(), Some("smesh0"));
+        assert_eq!(
+            config.ipv6_prefix,
+            Some([0xfd, 0x12, 0x34, 0x56, 0x78, 0x9a, 0, 0])
+        );
+        let err = parse_str("--hue eth0 --mesh-key-file k --ipv6-prefix fd00::1").unwrap_err();
+        assert!(err.contains("must be a /64"), "{err}");
     }
 
     #[test]

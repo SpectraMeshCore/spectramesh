@@ -10,7 +10,10 @@
 //!
 //! Every frame the router sends is sealed with a [link tag](crate::auth), and
 //! every frame it receives must carry a valid tag from a neighbor whose boot
-//! index has passed a challenge.
+//! index has passed a challenge. Unicast data is also encrypted end to end
+//! ([`session`](crate::session)).
+
+mod e2e;
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
@@ -20,12 +23,14 @@ use crate::auth::{KeyRing, ReplayWindow, TRAILER_LEN};
 use crate::crypto::Random;
 use crate::error::{Error, Result};
 use crate::hue::{HueId, HueInfo};
+use crate::identity::{Identity, PublicIdentity};
 use crate::neighbor::{self, NeighborTable};
 use crate::node::NodeId;
 use crate::packet::{
     Body, DATA_OVERHEAD, DataHeader, Frame, FrameKind, HEADER_LEN, Header, Tlv, Trailer,
 };
 use crate::routing::{self, INFINITY, Route, RouteEntry, RouteTable, SourceTable, seqno_newer};
+use crate::session::{Initiation, Session, TRANSPORT_OVERHEAD};
 use crate::time::Instant;
 
 /// Settings that apply to every hue. Per-hue timers live in [`HueInfo`].
@@ -74,6 +79,11 @@ pub struct Transmit {
 pub struct Delivery {
     pub src: NodeId,
     pub payload: Vec<u8>,
+    /// The sender's public keys, as proven by the end-to-end handshake. To be
+    /// sure who sent the data, compare their [hash](PublicIdentity::hash)
+    /// with the one you expect. `None` for broadcasts to neighbors, which
+    /// only the mesh key protects.
+    pub sender_keys: Option<PublicIdentity>,
 }
 
 /// What this node knows about a neighbor's frames on one hue, once its boot
@@ -108,6 +118,7 @@ struct HueState {
 
 pub struct Router {
     id: NodeId,
+    identity: Identity,
     config: Config,
     keys: KeyRing,
     random: Random,
@@ -137,19 +148,31 @@ pub struct Router {
     recent_requests: BTreeMap<NodeId, (u16, Instant)>,
     outbox: VecDeque<Transmit>,
     deliveries: VecDeque<Delivery>,
+    /// Other nodes' public keys, and when each was last used.
+    identities: BTreeMap<NodeId, (PublicIdentity, Instant)>,
+    identity_requests: BTreeMap<NodeId, e2e::IdentityRequest>,
+    /// End-to-end sessions, by this node's index for them.
+    sessions: BTreeMap<u32, Session>,
+    /// The session each peer's data goes out on.
+    current_sessions: BTreeMap<NodeId, u32>,
+    initiations: BTreeMap<NodeId, Initiation>,
+    /// Data held for each destination while a session is set up.
+    waiting: BTreeMap<NodeId, VecDeque<Vec<u8>>>,
 }
 
 impl Router {
-    /// Creates a router for node `id`, sending with the current key in `keys`.
+    /// Creates a router for the node with `identity`, sending with the
+    /// current key in `keys`.
     ///
     /// `seed` must be 32 fresh bytes from a cryptographic random number
-    /// generator every time the router starts. Nonces and the boot index come
-    /// from it, and reusing a seed would let recorded frames be replayed.
-    pub fn new(id: NodeId, keys: KeyRing, config: Config, seed: [u8; 32]) -> Self {
+    /// generator every time the router starts. Nonces, handshake keys and the
+    /// boot index come from it, and reusing a seed would break them.
+    pub fn new(identity: Identity, keys: KeyRing, config: Config, seed: [u8; 32]) -> Self {
         let mut random = Random::new(seed);
         let boot_index = random.next_u32();
         Router {
-            id,
+            id: identity.node_id(),
+            identity,
             config,
             keys,
             random,
@@ -170,11 +193,21 @@ impl Router {
             recent_requests: BTreeMap::new(),
             outbox: VecDeque::new(),
             deliveries: VecDeque::new(),
+            identities: BTreeMap::new(),
+            identity_requests: BTreeMap::new(),
+            sessions: BTreeMap::new(),
+            current_sessions: BTreeMap::new(),
+            initiations: BTreeMap::new(),
+            waiting: BTreeMap::new(),
         }
     }
 
     pub fn id(&self) -> NodeId {
         self.id
+    }
+
+    pub fn public_identity(&self) -> &PublicIdentity {
+        self.identity.public()
     }
 
     /// Registers a hue, replacing any existing one with the same ID. A new
@@ -267,11 +300,14 @@ impl Router {
                 if header.origin == self.id {
                     return Ok(Some(sender));
                 }
-                if header.dst == self.id || header.dst.is_broadcast() {
+                if header.dst.is_broadcast() {
                     self.deliveries.push_back(Delivery {
                         src: header.origin,
                         payload: payload.to_vec(),
+                        sender_keys: None,
                     });
+                } else if header.dst == self.id {
+                    self.handle_end_to_end(header.origin, payload, now)?;
                 } else {
                     self.forward(header, payload);
                 }
@@ -287,7 +323,7 @@ impl Router {
         let key = (frame.header.sender, hue);
         let Trailer { index, counter, .. } = frame.trailer;
         if let Some(peer) = self.peers.get_mut(&key).filter(|peer| peer.index == index) {
-            if !peer.window.accept(counter) {
+            if !peer.window.accept(counter.into()) {
                 return Err(Error::Replay);
             }
             peer.last_heard = now;
@@ -331,7 +367,7 @@ impl Router {
             key,
             Peer {
                 index,
-                window: ReplayWindow::new(counter),
+                window: ReplayWindow::new(counter.into()),
                 last_heard: now,
             },
         );
@@ -369,15 +405,17 @@ impl Router {
         self.send_control(hue, neighbor, &[Tlv::ChallengeRequest { nonce }]);
     }
 
-    /// Queues `payload` for `dst`.
+    /// Sends `payload` to `dst`, encrypted end to end.
     ///
+    /// The first time, this node finds `dst`'s keys and sets up a session,
+    /// holding the payload meanwhile, so it arrives a round trip or two later.
     /// Sending to [`NodeId::BROADCAST`] reaches direct neighbors on every hue
-    /// the payload fits on.
+    /// the payload fits on, protected only by the mesh key.
     //
-    // TODO: mesh-wide broadcast, like a Meshtastic channel.
-    pub fn send(&mut self, dst: NodeId, payload: &[u8]) -> Result<()> {
-        let len = DATA_OVERHEAD + payload.len();
+    // TODO: mesh-wide broadcast, like a Meshtastic channel, with group keys.
+    pub fn send(&mut self, dst: NodeId, payload: &[u8], now: Instant) -> Result<()> {
         if dst.is_broadcast() {
+            let len = DATA_OVERHEAD + payload.len();
             let hues: Vec<HueId> = self
                 .hues
                 .iter()
@@ -399,16 +437,20 @@ impl Router {
         }
 
         let route = *self.selected.get(&dst).ok_or(Error::NoRoute(dst))?;
-        if len > self.mtu(route.hue) {
+        if DATA_OVERHEAD + TRANSPORT_OVERHEAD + payload.len() > self.mtu(route.hue) {
             return Err(Error::PayloadTooLarge);
         }
-        let header = DataHeader {
-            origin: self.id,
-            dst,
-            ttl: self.config.default_ttl,
-        };
-        self.queue_data(route.hue, route.next_hop, &header, payload);
-        Ok(())
+        self.send_unicast(dst, payload, now)
+    }
+
+    /// The largest payload [`send`](Self::send) accepts for `dst` along its
+    /// current route, or `None` without a route.
+    pub fn max_payload(&self, dst: NodeId) -> Option<usize> {
+        let route = self.selected.get(&dst)?;
+        Some(
+            self.mtu(route.hue)
+                .saturating_sub(DATA_OVERHEAD + TRANSPORT_OVERHEAD),
+        )
     }
 
     /// Runs timed work: expiry, route selection, hellos and updates.
@@ -432,6 +474,7 @@ impl Router {
         if self.stale {
             self.reselect(now);
         }
+        self.poll_end_to_end(now);
         for i in 0..self.hues.len() {
             self.send_scheduled(i, now);
         }
@@ -492,6 +535,10 @@ impl Router {
             }
             // Only meaningful from an unverified neighbor; see `check_fresh`.
             Tlv::ChallengeReply { .. } => {}
+            Tlv::IdentityRequest { node, hop_count } => {
+                self.handle_identity_request(from, hue, node, hop_count, now)
+            }
+            Tlv::Identity(public) => self.handle_identity(public, now),
         }
     }
 
@@ -832,8 +879,13 @@ mod tests {
         router_with(id, KeyRing::new(&mesh_key()), [id as u8; 32], hues)
     }
 
+    /// A router whose identity comes from `id`, so a restarted router with
+    /// the same `id` keeps its node ID.
     fn router_with(id: u64, keys: KeyRing, seed: [u8; 32], hues: &[HueInfo]) -> Router {
-        let mut router = Router::new(NodeId::from_u64(id), keys, Config::default(), seed);
+        let mut secret = [0u8; 32];
+        secret[..8].copy_from_slice(&id.to_be_bytes());
+        let identity = Identity::from_secret(secret);
+        let mut router = Router::new(identity, keys, Config::default(), seed);
         for &hue in hues {
             router.add_hue(hue);
         }
@@ -842,6 +894,10 @@ mod tests {
 
     fn secs(s: u64) -> Duration {
         Duration::from_secs(s)
+    }
+
+    fn now_after(s: u64) -> Instant {
+        Instant::default() + secs(s)
     }
 
     /// Runs `routers` from `from` for `duration` in 100 ms steps, passing each
@@ -867,8 +923,10 @@ mod tests {
                         };
                         if hue == tx.hue {
                             match routers[peer].handle_frame(hue, &tx.frame, now) {
-                                // Neighbors meeting for the first time challenge each other.
-                                Ok(_) | Err(Error::Unverified) => {}
+                                // Neighbors meeting for the first time challenge
+                                // each other, and a restarted node has lost its
+                                // sessions.
+                                Ok(_) | Err(Error::Unverified | Error::NoSession) => {}
                                 Err(err) => panic!("router {peer} rejected a frame: {err}"),
                             }
                         }
@@ -902,13 +960,16 @@ mod tests {
         assert_eq!(next_hop(c, a), Some((b.id(), SUB_GHZ)));
 
         let c_id = c.id();
-        routers[0].send(c_id, b"hello across two hues").unwrap();
-        simulate(&mut routers, &links, now, Duration::from_millis(200));
+        routers[0]
+            .send(c_id, b"hello across two hues", now)
+            .unwrap();
+        simulate(&mut routers, &links, now, secs(1));
         assert_eq!(
             routers[2].poll_delivery(),
             Some(Delivery {
                 src: routers[0].id(),
                 payload: b"hello across two hues".to_vec(),
+                sender_keys: Some(*routers[0].public_identity()),
             })
         );
     }
@@ -960,7 +1021,8 @@ mod tests {
         simulate(&mut routers, &links, Instant::default(), secs(10));
         let b = routers[1].id();
 
-        routers[0].send(b, b"unicast").unwrap();
+        // The first frame for a new destination asks for its keys.
+        routers[0].send(b, b"unicast", now_after(10)).unwrap();
         let tx = routers[0].poll_transmit().unwrap();
         assert_eq!(tx.next_hop, b);
 
@@ -1031,10 +1093,12 @@ mod tests {
         let links = [(0, 1, WIFI), (0, 2, SUB_GHZ)];
         let now = simulate(&mut routers, &links, Instant::default(), secs(5));
 
-        routers[0].send(NodeId::BROADCAST, b"anyone?").unwrap();
+        routers[0].send(NodeId::BROADCAST, b"anyone?", now).unwrap();
         simulate(&mut routers, &links, now, Duration::from_millis(100));
         for peer in &mut routers[1..] {
-            assert_eq!(peer.poll_delivery().unwrap().payload, b"anyone?");
+            let delivery = peer.poll_delivery().unwrap();
+            assert_eq!(delivery.payload, b"anyone?");
+            assert_eq!(delivery.sender_keys, None);
         }
     }
 
@@ -1067,12 +1131,13 @@ mod tests {
             a.handle_frame(WIFI, &[], Instant::default()),
             Err(Error::UnknownHue(WIFI))
         );
+        let now = Instant::default();
         assert_eq!(
-            a.send(NodeId::BROADCAST, &[0; 300]),
+            a.send(NodeId::BROADCAST, &[0; 300], now),
             Err(Error::PayloadTooLarge)
         );
         assert_eq!(
-            a.send(NodeId::from_u64(9), b"hi"),
+            a.send(NodeId::from_u64(9), b"hi", now),
             Err(Error::NoRoute(NodeId::from_u64(9)))
         );
     }
@@ -1202,5 +1267,127 @@ mod tests {
         simulate(&mut routers, &[(0, 1, WIFI)], Instant::default(), secs(10));
         assert!(routers[0].route_to(routers[1].id()).is_some());
         assert!(routers[1].route_to(routers[0].id()).is_some());
+    }
+
+    /// Like `simulate`, but also returns every frame `watched` transmitted.
+    fn simulate_watching(
+        routers: &mut [Router],
+        links: &[(usize, usize, HueId)],
+        from: Instant,
+        duration: Duration,
+        watched: usize,
+    ) -> Vec<Vec<u8>> {
+        let mut seen = Vec::new();
+        let mut now = from;
+        while now < from + duration {
+            let step = Duration::from_millis(100);
+            for i in 0..routers.len() {
+                routers[i].poll(now);
+                while let Some(tx) = routers[i].poll_transmit() {
+                    if i == watched {
+                        seen.push(tx.frame.clone());
+                    }
+                    for &(a, b, hue) in links {
+                        let peer = match (a == i, b == i) {
+                            (true, _) => b,
+                            (_, true) => a,
+                            _ => continue,
+                        };
+                        if hue == tx.hue {
+                            let _ = routers[peer].handle_frame(hue, &tx.frame, now);
+                        }
+                    }
+                }
+            }
+            now = now + step;
+        }
+        seen
+    }
+
+    fn line(n: u64) -> (Vec<Router>, Vec<(usize, usize, HueId)>) {
+        let routers = (1..=n).map(|id| router(id, &[wifi()])).collect();
+        let links = (0..n as usize - 1).map(|i| (i, i + 1, WIFI)).collect();
+        (routers, links)
+    }
+
+    fn deliveries(router: &mut Router) -> Vec<Vec<u8>> {
+        core::iter::from_fn(|| router.poll_delivery())
+            .map(|d| d.payload)
+            .collect()
+    }
+
+    #[test]
+    fn relays_cannot_read_end_to_end_data() {
+        let (mut routers, links) = line(3);
+        let now = simulate(&mut routers, &links, Instant::default(), secs(20));
+        let c = routers[2].id();
+
+        routers[0].send(c, b"for C's eyes only", now).unwrap();
+        let relayed = simulate_watching(&mut routers, &links, now, secs(2), 1);
+        assert!(!relayed.is_empty());
+        assert!(
+            relayed
+                .iter()
+                .all(|frame| !frame.windows(8).any(|w| w == b"C's eyes"))
+        );
+        assert_eq!(deliveries(&mut routers[2]), [b"for C's eyes only".to_vec()]);
+        assert!(deliveries(&mut routers[1]).is_empty());
+    }
+
+    #[test]
+    fn keys_are_found_across_several_hops() {
+        let (mut routers, links) = line(5);
+        let now = simulate(&mut routers, &links, Instant::default(), secs(30));
+        let (first, last) = (routers[0].id(), routers[4].id());
+
+        // Sent before any session exists: held, then delivered in order.
+        for n in 0..3u8 {
+            routers[0].send(last, &[n], now).unwrap();
+        }
+        let now = simulate(&mut routers, &links, now, secs(2));
+        assert_eq!(deliveries(&mut routers[4]), [[0], [1], [2]]);
+
+        // The handshake told the far end who the sender is, so it can reply
+        // straight away.
+        routers[4].send(first, b"got them", now).unwrap();
+        simulate(&mut routers, &links, now, Duration::from_millis(500));
+        assert_eq!(deliveries(&mut routers[0]), [b"got them".to_vec()]);
+    }
+
+    #[test]
+    fn sessions_recover_when_the_far_end_restarts() {
+        let (mut routers, links) = line(3);
+        let now = simulate(&mut routers, &links, Instant::default(), secs(20));
+        let c = routers[2].id();
+        routers[0].send(c, b"before", now).unwrap();
+        let now = simulate(&mut routers, &links, now, secs(2));
+        assert_eq!(deliveries(&mut routers[2]), [b"before".to_vec()]);
+
+        // C restarts with the same identity and no sessions. A's next message
+        // is lost, but A notices the silence and sets up a new session.
+        routers[2] = router_with(3, KeyRing::new(&mesh_key()), [0xcc; 32], &[wifi()]);
+        let now = simulate(&mut routers, &links, now, secs(10));
+        routers[0].send(c, b"lost", now).unwrap();
+        let now = simulate(&mut routers, &links, now, secs(20));
+        routers[0].send(c, b"after", now).unwrap();
+        simulate(&mut routers, &links, now, secs(2));
+        assert_eq!(deliveries(&mut routers[2]), [b"after".to_vec()]);
+    }
+
+    #[test]
+    fn sessions_are_replaced_every_two_minutes() {
+        let (mut routers, links) = line(2);
+        let mut now = simulate(&mut routers, &links, Instant::default(), secs(10));
+        let b = routers[1].id();
+        let mut indexes = BTreeSet::new();
+        // Steady traffic for five minutes, crossing two rekeys and an expiry.
+        for n in 0..30u8 {
+            routers[0].send(b, &[n], now).unwrap();
+            now = simulate(&mut routers, &links, now, secs(10));
+            assert_eq!(deliveries(&mut routers[1]), [[n]], "message {n}");
+            indexes.extend(routers[0].current_sessions.values().copied());
+        }
+        assert!(indexes.len() >= 3, "only {} sessions", indexes.len());
+        assert!(routers[0].sessions.len() <= 2);
     }
 }

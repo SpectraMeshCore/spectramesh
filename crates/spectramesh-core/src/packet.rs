@@ -35,6 +35,7 @@ use core::time::Duration;
 
 use crate::auth::{TAG_LEN, TRAILER_LEN};
 use crate::error::{Error, Result};
+use crate::identity::PublicIdentity;
 use crate::node::NodeId;
 
 pub const VERSION: u8 = 2;
@@ -212,6 +213,12 @@ pub enum Tlv {
     ChallengeRequest { nonce: u64 },
     /// The echo of a [`Tlv::ChallengeRequest`] nonce.
     ChallengeReply { nonce: u64 },
+    /// "Please send me `node`'s public keys." Passed towards `node` for up
+    /// to `hop_count` hops, until a node that has them answers.
+    IdentityRequest { node: NodeId, hop_count: u8 },
+    /// A node's public keys. Receivers check them against the node ID they
+    /// asked for, so relays can't substitute other keys.
+    Identity(PublicIdentity),
 }
 
 impl Tlv {
@@ -222,6 +229,8 @@ impl Tlv {
     const SEQNO_REQUEST: u8 = 5;
     const CHALLENGE_REQUEST: u8 = 6;
     const CHALLENGE_REPLY: u8 = 7;
+    const IDENTITY_REQUEST: u8 = 8;
+    const IDENTITY: u8 = 9;
 
     /// Bytes this TLV takes in a frame, including its type and length.
     pub fn encoded_len(&self) -> usize {
@@ -236,6 +245,8 @@ impl Tlv {
             Tlv::RouteRequest { .. } => 8,
             Tlv::SeqnoRequest { .. } => 11,
             Tlv::ChallengeRequest { .. } | Tlv::ChallengeReply { .. } => 8,
+            Tlv::IdentityRequest { .. } => 9,
+            Tlv::Identity(_) => 64,
         }
     }
 
@@ -248,6 +259,8 @@ impl Tlv {
             Tlv::SeqnoRequest { .. } => Self::SEQNO_REQUEST,
             Tlv::ChallengeRequest { .. } => Self::CHALLENGE_REQUEST,
             Tlv::ChallengeReply { .. } => Self::CHALLENGE_REPLY,
+            Tlv::IdentityRequest { .. } => Self::IDENTITY_REQUEST,
+            Tlv::Identity(_) => Self::IDENTITY,
         }
     }
 
@@ -291,6 +304,14 @@ impl Tlv {
             }
             Tlv::ChallengeRequest { nonce } | Tlv::ChallengeReply { nonce } => {
                 buf.extend_from_slice(&nonce.to_be_bytes());
+            }
+            Tlv::IdentityRequest { node, hop_count } => {
+                buf.extend_from_slice(&node.0);
+                buf.push(hop_count);
+            }
+            Tlv::Identity(public) => {
+                buf.extend_from_slice(&public.ed25519);
+                buf.extend_from_slice(&public.x25519);
             }
         }
     }
@@ -355,6 +376,20 @@ impl Tlv {
                 Tlv::ChallengeReply {
                     nonce: u64_at(body, 0),
                 }
+            }
+            Self::IDENTITY_REQUEST => {
+                need(9)?;
+                Tlv::IdentityRequest {
+                    node: node_at(body, 0),
+                    hop_count: body[8],
+                }
+            }
+            Self::IDENTITY => {
+                need(64)?;
+                Tlv::Identity(PublicIdentity {
+                    ed25519: body[..32].try_into().expect("32 bytes"),
+                    x25519: body[32..64].try_into().expect("32 bytes"),
+                })
             }
             _ => return Ok(None),
         };
@@ -495,6 +530,14 @@ mod tests {
                 nonce: 0x0123_4567_89ab_cdef,
             },
             Tlv::ChallengeReply { nonce: 1 },
+            Tlv::IdentityRequest {
+                node: B,
+                hop_count: 16,
+            },
+            Tlv::Identity(PublicIdentity {
+                ed25519: [1; 32],
+                x25519: [2; 32],
+            }),
         ];
         let bytes = control_frame(&sent);
         let expected_len = CONTROL_OVERHEAD + sent.iter().map(Tlv::encoded_len).sum::<usize>();

@@ -36,14 +36,16 @@ On switched networks, the platform can unicast instead of broadcasting: every fr
 
 ## Security
 
-Phase 1 of the [security design](../../docs/design/wire-format-v2.md) is in place:
+Phases 1 and 2 of the [security design](../../docs/design/wire-format-v2.md) are in place:
 
 - **Node IDs come from keys.** Each node keeps a 32-byte secret, from which it derives Ed25519 and X25519 key pairs. Its 8-byte node ID is the start of a hash of the public keys, so claiming another node's ID means finding keys that hash to it ([`identity.rs`](src/identity.rs)).
 - **Every frame is authenticated** with an 8-byte tag keyed with the shared mesh key. Nodes without the key can't inject or alter anything ([`auth.rs`](src/auth.rs)).
 - **Replays are rejected.** Each frame carries the sender's random boot index and a counter. A neighbor with an unknown boot index must answer a challenge before its frames count.
 - **Keys can change without downtime.** A node can accept several mesh keys while sending with one.
+- **Unicast data is encrypted end to end** ([`session.rs`](src/session.rs)), so relays and other members can't read or alter it. Nodes find each other's public keys by asking along the route, then set up a session with one round trip of the Noise IK handshake, as WireGuard does. Sessions are replaced every 2 minutes and recover on their own when the other side restarts.
+- **Deliveries say who sent them.** Each delivery carries the sender's public keys as proven by the handshake, so an application can compare the full identity hash with the one it expects.
 
-End-to-end encryption between nodes is phase 2.
+Broadcasts to neighbors are only protected by the mesh key; group keys are phase 3.
 
 ## Using it
 
@@ -53,7 +55,7 @@ use spectramesh_core::{Config, HueId, HueInfo, HueKind, Identity, KeyRing, MeshK
 // Stored secrets, and 32 fresh random bytes on every start.
 let identity = Identity::from_secret(stored_secret);
 let mesh_key = MeshKey::from_text("smk1-...")?;
-let mut router = Router::new(identity.node_id(), KeyRing::new(&mesh_key), Config::default(), random_seed);
+let mut router = Router::new(identity, KeyRing::new(&mesh_key), Config::default(), random_seed);
 // Timers are picked from the bitrate; change the fields to override them.
 router.add_hue(HueInfo::new(HueId(0), HueKind::Wifi { freq_mhz: 2437 }, 1400, 20_000_000));
 router.add_hue(HueInfo::new(HueId(1), HueKind::Fsk { freq_khz: 915_000 }, 255, 250_000));
@@ -64,6 +66,7 @@ router.add_hue(HueInfo::new(HueId(2), HueKind::Ethernet, 1500, 1_000_000_000));
 // router.poll(now);                          at or after router.next_wakeup()
 // while let Some(tx) = router.poll_transmit() { /* send tx.frame on tx.hue, to tx.next_hop */ }
 // while let Some(packet) = router.poll_delivery() { /* hand to the app */ }
+// router.send(dst, &data, now)?;               encrypted end to end
 ```
 
 ## Wire format
@@ -71,7 +74,7 @@ router.add_hue(HueInfo::new(HueId(2), HueKind::Ethernet, 1500, 1_000_000_000));
 Version 2: an 18-byte header (version and frame kind, mesh key ID, sender, next hop), a body, and a 16-byte trailer (boot index, counter, tag):
 
 - **Control frames**: Babel-style TLVs (hello, IHU, update, route and seqno requests, challenges), several per frame.
-- **Data frames**: origin, destination and TTL, then the payload. 51 bytes of overhead in all.
+- **Data frames**: origin, destination and TTL, then the payload: for unicast, an end-to-end message (a handshake, or encrypted data). 81 bytes of overhead in all for encrypted data.
 
 See [`packet.rs`](src/packet.rs) and the [design document](../../docs/design/wire-format-v2.md). The format is SpectraMesh's own, so it doesn't exchange routes with `babeld`.
 
@@ -85,4 +88,4 @@ Each is marked with a `TODO` in the code.
 - Split horizon on wired hues, to send smaller updates on switched networks
 - Telling 1 Gbit/s from 10 Gbit/s links apart (both cost 1)
 - Mesh-wide broadcast (today, broadcast reaches direct neighbors only)
-- End-to-end encryption, and signed seqnos (phases 2 and 3 of the security design)
+- Signed seqnos and group keys (phase 3 of the security design)

@@ -1,6 +1,6 @@
 # Wire format v2 and security
 
-**Status:** Accepted, with the recommended answer to every open question. Phase 1 is in progress.
+**Status:** Accepted, with the recommended answer to every open question. Phases 1 and 2 are implemented; phase 3 hasn't started.
 
 SpectraMesh v1 has no security: anyone in radio range can read traffic, inject routes, and impersonate any node. Its 4-byte node IDs can't be tied to keys either. This document proposes the second version of the wire format, built around security, before anything is deployed and while the format is still cheap to change.
 
@@ -9,7 +9,7 @@ SpectraMesh v1 has no security: anyone in radio range can read traffic, inject r
 - **Identity.** Each node has its own key pair, created on first boot. Its node ID is derived from its public keys, so nobody can claim an ID without holding the matching private key. IDs grow from 4 to **8 bytes**.
 - **Layer 1: link authentication**, hop by hop. Every frame carries a short tag computed with the shared **mesh key**, plus a counter. Outsiders can't inject or replay anything, and relays drop forged traffic before forwarding it. This follows Babel's own authentication design (RFC 8967).
 - **Layer 2: end-to-end encryption** for data. Two nodes set up a session with a Noise handshake, the pattern WireGuard uses, so relays and other mesh members can't read their traffic.
-- **Cost:** a data frame's overhead grows from 14 bytes to 77. That still leaves 173 bytes of payload in a 250-byte ESP-NOW frame, and 1,421 bytes on Ethernet.
+- **Cost:** a data frame's overhead grows from 14 bytes to 81. That still leaves 169 bytes of payload in a 250-byte ESP-NOW frame, and 1,417 bytes on Ethernet.
 
 The [decisions](#decisions) at the end record the choices made.
 
@@ -128,9 +128,11 @@ Distributing keys is manual for now: a config option on Linux, and serial or pro
 This layer stops other members. Unicast data is encrypted between source and destination with a **Noise IK** handshake, the same pattern WireGuard uses:
 
 1. The initiator already knows the responder's static X25519 key, from identity discovery.
-2. **One round trip** sets up a session: about 96 bytes there and 48 back. Both sides authenticate, and the session gets forward secrecy.
-3. Data then travels as: session epoch (1 byte), counter (8 bytes), ciphertext, and a 16-byte tag (ChaCha20-Poly1305).
-4. Sessions rekey every 2 minutes or 2⁶⁰ messages, whichever comes first, as WireGuard does.
+2. **One round trip** sets up a session: 133 bytes there and 57 back. The initiator's message carries its Ed25519 key, encrypted, so the responder can check that the keys hash to the node ID the frame claims. Both sides authenticate, and the session gets forward secrecy.
+3. Data then travels as: the receiver's session index (4 bytes), a counter (8 bytes), ciphertext, and a 16-byte tag (ChaCha20-Poly1305). Counters let messages arrive out of order; a 64-message window rejects repeats.
+4. As in WireGuard, the responder doesn't send on a session until the initiator has used it, which proves the handshake wasn't a replay. An initiator with no data waiting sends a keepalive for that.
+5. Sessions are replaced when data is sent on one older than 2 minutes (or after 2⁶⁰ messages), and dropped at 3 minutes. Idle sessions just expire.
+6. Two timers, also from WireGuard, notice when the other side has lost the session, for example by restarting: a node that received data but has sent nothing for 10 seconds sends a keepalive, and a node that sent data but has heard nothing for 15 seconds starts a new handshake.
 
 The first byte inside the ciphertext names what the payload is (an IP packet, an application message, and so on), so even that is hidden from relays.
 
@@ -138,7 +140,7 @@ The first byte inside the ciphertext names what the payload is (an IP packet, an
 
 | Option | Overhead per message | Forward secrecy | Setup | Fits |
 |---|---|---|---|---|
-| **Noise IK sessions** (recommended) | 25 bytes | Yes | 1 round trip | Ongoing traffic, IP |
+| **Noise IK sessions** (recommended) | 30 bytes | Yes | 1 round trip | Ongoing traffic, IP |
 | Ephemeral key per message (like Reticulum) | 48 bytes | Partial | None | One-off messages on slow links |
 | Static keys, random nonce | 40 bytes | No | None | Simple, but weakest |
 
@@ -193,7 +195,7 @@ The common header, then TLVs, then the trailer. Changes from v1:
 | 18..26 | Origin: the node that created the packet |
 | 26..34 | Destination node ID |
 | 34 | TTL |
-| 35.. | End-to-end payload: epoch (1), counter (8), ciphertext, tag (16) |
+| 35.. | End-to-end message: type (1), receiver's session index (4), counter (8), ciphertext, tag (16) |
 | last 16 | Trailer |
 
 The header's sender changes at every hop, and is what the trailer is checked against. The origin stays the same end to end.
@@ -205,17 +207,17 @@ Noise handshake messages travel as data frames, with their own payload kind.
 | | v1 | v2 |
 |---|---|---|
 | Hello frame | 15 bytes | 40 bytes |
-| Data overhead per frame | 14 bytes | 77 bytes (51 until phase 2 adds end-to-end encryption) |
-| Payload in a 250-byte ESP-NOW v1 frame | 236 | **173** |
-| Payload in a 255-byte sub-GHz FSK frame | 241 | **178** |
-| Payload in a 1,470-byte ESP-NOW v2 frame | 1,456 | **1,393** |
-| Payload on Ethernet (1,498 bytes) | 1,484 | **1,421** |
+| Data overhead per frame | 14 bytes | 81 bytes (51 for broadcasts to neighbors, which aren't end-to-end encrypted) |
+| Payload in a 250-byte ESP-NOW v1 frame | 236 | **169** |
+| Payload in a 255-byte sub-GHz FSK frame | 241 | **174** |
+| Payload in a 1,470-byte ESP-NOW v2 frame | 1,456 | **1,389** |
+| Payload on Ethernet (1,498 bytes) | 1,484 | **1,417** |
 
 On a 250 kbit/s link with 10-second hellos, the extra 25 bytes per hello is under 1 ms of airtime every 10 seconds.
 
 ## IP addressing
 
-The Linux daemon's planned TUN device can give each node an IPv6 address derived from its identity:
+The Linux daemon's TUN device (`spectrameshd --tun`) gives each node an IPv6 address derived from its identity:
 
 ```
 fdXX:XXXX:XXXX:0000 : <8-byte node ID>
@@ -224,13 +226,17 @@ fdXX:XXXX:XXXX:0000 : <8-byte node ID>
 
 A packet to that address routes straight to the node, with no address assignment or lookup table. Its keys are found with identity discovery. IPv4 could be carried later with configured mappings.
 
-**MTU:** IPv6 needs at least 1,280 bytes per packet. That fits on Ethernet, Wi-Fi and ESP-NOW v2, but not on 250-byte hues, which will need a fragmentation layer to carry IP. Application messages that fit in one frame don't need it.
+**No spoofing:** a packet from the mesh is only written to the TUN device if its source address belongs to the node that sent it, as proven by the session.
+
+**Stable addresses:** the prefix comes from the first mesh key, so changing the key changes every address. A mesh that wants stable addresses sets its prefix explicitly (`--ipv6-prefix`).
+
+**MTU:** IPv6 needs at least 1,280 bytes per packet. The TUN device's MTU is the smallest hue's MTU less the 81 bytes of overhead: 1,417 on Ethernet. That fits on Ethernet, Wi-Fi and ESP-NOW v2, but not on 250-byte hues, which will need a fragmentation layer to carry IP. Application messages that fit in one frame don't need it.
 
 ## Implementation notes
 
-**Cryptography:** the WireGuard set of algorithms: X25519, ChaCha20-Poly1305 and BLAKE2s, plus Ed25519 for signatures. RustCrypto and dalek crates provide all of them in pure Rust that works in `no_std`. Using one well-studied set means fewer combinations to get wrong.
+**Cryptography:** the WireGuard set of algorithms: X25519, ChaCha20-Poly1305 and BLAKE2s, plus Ed25519 for signatures. The Noise handshake and transport come from the [`snow`](https://crates.io/crates/snow) crate; the other primitives from the RustCrypto and dalek crates, at the versions `snow` uses, so firmware carries one copy of each. All are pure Rust and work in `no_std`.
 
-**Keeping the core sans-IO:** `spectramesh-core` gets a crypto module. The platform supplies randomness through the `rand_core::CryptoRng` trait (the ESP32's hardware RNG, or `getrandom` on Linux), the same way it already supplies time. Key storage stays in the platform crates.
+**Keeping the core sans-IO:** the platform passes the router a 32-byte seed from its hardware or OS random number generator at startup (the ESP32's RNG, or `getrandom` on Linux), the same way it supplies time. Nonces, boot indexes and handshake keys come from a generator keyed with that seed. Key storage stays in the platform crates.
 
 **ESP32-C6 performance:** expect X25519 and Ed25519 operations to take milliseconds in software. They're only needed for handshakes, roughly one per peer every 2 minutes. ChaCha20 and BLAKE2s are fast in software, and the C6's AES and SHA accelerators aren't needed. **To be measured** on the XIAO boards.
 
@@ -254,6 +260,14 @@ Implementing phase 1 showed two gaps in the original draft:
 2. **The boot index belongs in every frame, not only in hellos.** Otherwise a node couldn't check frames from a neighbor that arrived before that neighbor's next hello. Moving the index into the trailer makes every frame checkable on its own, and verification identical for every frame. It costs 4 bytes per frame, offset by using a 4-byte index instead of 8.
 
 Overheads above include both changes.
+
+## Changes during phase 2
+
+1. **Transport messages name the receiver's session with a 4-byte index**, as WireGuard does, rather than a 1-byte epoch. Each side picks its own index, so simultaneous handshakes and rekeys can't collide. It costs 4 more bytes per message (30 instead of 26).
+2. **The handshake init carries the initiator's Ed25519 key.** The responder needs both public keys to check them against the claimed node ID, and Noise only carries the X25519 one.
+3. **Liveness timers** (keepalive after 10 seconds, new handshake after 15 seconds of silence) were added, so a session recovers quickly when the other side restarts.
+4. **Identity answers only count if someone asked for them**, so a member can't fill other nodes' caches with keys nobody wanted.
+5. **Broadcasts to neighbors stay protected only by the mesh key** until phase 3 adds group keys.
 
 ## Decisions
 

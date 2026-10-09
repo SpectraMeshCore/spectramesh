@@ -48,6 +48,17 @@ impl MeshKey {
         crypto::derive_key(&self.0, "SpectraMesh key id v1")[0]
     }
 
+    /// An IPv6 unique local `/64` prefix for the mesh: `fd`, 40 bits
+    /// derived from the key, and subnet 0. Each node's address is this
+    /// prefix followed by its 8-byte node ID.
+    ///
+    /// Changing the mesh key changes the prefix, so a mesh that wants stable
+    /// addresses across key changes should fix its prefix in configuration.
+    pub fn ipv6_prefix(&self) -> [u8; 8] {
+        let hash = crypto::derive_key(&self.0, "SpectraMesh IPv6 prefix v1");
+        [0xfd, hash[0], hash[1], hash[2], hash[3], hash[4], 0, 0]
+    }
+
     fn link_key(&self) -> [u8; 32] {
         crypto::derive_key(&self.0, "SpectraMesh link v1")
     }
@@ -215,21 +226,29 @@ impl Drop for KeyRing {
 /// slightly out of order are still accepted, once each.
 #[derive(Clone, Copy, Debug)]
 pub struct ReplayWindow {
-    highest: u32,
+    highest: u64,
     /// Bit `n` is set if counter `highest - n` has been seen.
     seen: u64,
 }
 
 impl ReplayWindow {
-    pub fn new(first: u32) -> Self {
+    pub fn new(first: u64) -> Self {
         ReplayWindow {
             highest: first,
             seen: 1,
         }
     }
 
+    /// Whether `counter` would be accepted, without recording it.
+    pub fn is_fresh(&self, counter: u64) -> bool {
+        counter > self.highest || {
+            let age = self.highest - counter;
+            age < 64 && self.seen & (1 << age) == 0
+        }
+    }
+
     /// Records `counter`. Returns false if it was seen before or is too old to tell.
-    pub fn accept(&mut self, counter: u32) -> bool {
+    pub fn accept(&mut self, counter: u64) -> bool {
         if counter > self.highest {
             let shift = counter - self.highest;
             self.seen = if shift >= 64 { 0 } else { self.seen << shift };
@@ -259,6 +278,14 @@ mod tests {
         let parsed = MeshKey::from_text(&text.to_uppercase()).unwrap();
         assert_eq!(parsed.0, key.0);
         assert_eq!(parsed.id(), key.id());
+    }
+
+    #[test]
+    fn ipv6_prefixes_are_unique_local() {
+        let prefix = MeshKey::from_bytes([3; 32]).ipv6_prefix();
+        assert_eq!(prefix[0], 0xfd);
+        assert_eq!(prefix[6..], [0, 0]);
+        assert_ne!(prefix, MeshKey::from_bytes([4; 32]).ipv6_prefix());
     }
 
     #[test]

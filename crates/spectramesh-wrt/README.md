@@ -41,9 +41,25 @@ Run `spectrameshd --help` for every option. Each node logs its neighbors and rou
 
 List more than one key in the mesh key file, one per line. Nodes send with the first and accept all of them. To change keys without downtime: add the new key as a second line everywhere, then move it to the first line everywhere, then remove the old one.
 
+### IPv6 over the mesh
+
+With `--tun smesh0`, the daemon creates a TUN device and gives this node an IPv6 address: the mesh's `/64` prefix followed by its node ID. Any program can then reach any other node by address, encrypted end to end:
+
+```
+$ spectrameshd --node-info --mesh-key-file /etc/spectramesh/mesh.key
+node ID:       !5aced5892ccbf39d
+identity hash: 5aced5892ccbf39d...
+IPv6 address:  fd72:a1fd:63c4:0:5ace:d589:2ccb:f39d
+$ ping fd72:a1fd:63c4:0:5ace:d589:2ccb:f39d
+```
+
+The prefix comes from the first mesh key, so changing the key changes every address. To keep addresses stable, pick a prefix and pass it to every node with `--ipv6-prefix fd12:3456:789a::`.
+
+The TUN device needs root or `CAP_NET_ADMIN`. Its MTU is the smallest hue's MTU less SpectraMesh's 81 bytes of overhead, and IPv6 needs at least 1,280, so every hue must be Ethernet-sized. Packets arriving from the mesh are only passed to the system if their source address belongs to the node that sent them.
+
 ## Trying it without hardware
 
-`scripts/veth-demo.sh` runs four nodes in a throwaway network namespace, joined by virtual Ethernet cables. Nodes 1 and 3 reach each other through node 2. Node 4 is plugged into node 2 too, but has a different mesh key. It needs no root.
+`scripts/veth-demo.sh` runs four nodes, each in a throwaway network namespace of its own, joined by virtual Ethernet cables. Nodes 1 and 3 reach each other through node 2, and node 1 pings node 3's IPv6 address. Node 4 is plugged into node 2 too, but has a different mesh key. It needs no root.
 
 ```
 cargo build -p spectramesh-wrt
@@ -51,9 +67,10 @@ crates/spectramesh-wrt/scripts/veth-demo.sh
 ```
 
 ```
-[node 1] info:   !56fdc458df50ac8b via !2be57b5a26be4364 on a0, cost 2 us
+[node 1 ping] 3 packets transmitted, 3 received, 0% packet loss, time 2003ms
+[node 1] info:   !5aced5892ccbf39d via !9149fdc63f0b6b51 on a0, cost 2 us
 [node 2] warning: dropped a frame on hue 2: frame tag doesn't verify with any mesh key
-[node 4] info: node !db72f1c99a57484f: 0 neighbor links, 0 routes
+[node 4] info: node !8b6ff553f685778c: 0 neighbor links, 0 routes
 ```
 
 Node IDs are random, because each run creates new keys.
@@ -102,7 +119,9 @@ config hue
 	option bitrate '100M'
 ```
 
-Then `service spectramesh start`, and watch it with `logread -f`.
+Add `option tun 'smesh0'` to the `main` section to carry IPv6, and set `option ipv6_prefix` to keep addresses stable when the mesh key changes. Then `service spectramesh start`, and watch it with `logread -f`.
+
+The TUN device isn't in any firewall zone until you add it. To control what can reach the router over the mesh, put `smesh0` in a zone: for example, an interface with `option device 'smesh0'` and `option proto 'none'` in `/etc/config/network`, added to a zone in `/etc/config/firewall`.
 
 Make the mesh key with `spectrameshd --generate-mesh-key`, on the router or any other machine, and use the same key on every node. The init script copies the keys to a root-only file in RAM for the daemon. The node's own secret is created in `/etc/spectramesh/node.key` on first start; keep it in your backups to keep the node's ID.
 
@@ -137,16 +156,18 @@ Encrypted mesh needs a full `wpad` package (such as `wpad-mbedtls`) instead of t
 | `src/main.rs` | Opens each device and starts the daemon |
 | `src/config.rs` | Command-line options |
 | `src/keys.rs` | The node's identity file, mesh key files, and random numbers from the kernel |
-| `src/link.rs` | Raw Ethernet sockets. With `keys.rs`'s call for random numbers, the only `unsafe` code in the project |
-| `src/daemon.rs` | One receive thread per hue, plus the router thread, which also learns neighbors' MAC addresses from frames the router has authenticated |
+| `src/link.rs` | Raw Ethernet sockets. With `tun.rs`'s device setup and `keys.rs`'s call for random numbers, the only `unsafe` code in the project |
+| `src/tun.rs` | The TUN device for IPv6, and mesh addresses |
+| `src/daemon.rs` | One receive thread per hue and one for the TUN device, plus the router thread, which also learns neighbors' MAC addresses from frames the router has authenticated |
 | `openwrt/` | The package Makefile, the procd init script and the default UCI config |
-| `scripts/veth-demo.sh` | The four-node demo |
+| `scripts/veth-demo.sh` | The four-node demo, with a ping over the mesh |
 
 It uses plain threads, with no async runtime, to keep the binary small for routers.
 
 ## Next steps
 
-- **Carrying IP traffic**, through a TUN device, so the mesh is useful to the rest of the router (today, mesh data is only logged)
+- **ICMPv6 errors** (unreachable, packet too big) for packets that can't be delivered; today they're dropped
+- **Routing a whole LAN's traffic**, so devices behind a router reach the mesh without running SpectraMesh themselves
 - **A UDP hue**, for linking sites over the internet or networks SpectraMesh doesn't control
 - **Status over ubus**, and a LuCI page
 - **Registering an EtherType** before a public release (`0x88B5` is reserved for experiments)

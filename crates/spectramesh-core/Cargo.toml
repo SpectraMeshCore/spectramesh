@@ -12,7 +12,9 @@ keywords = ["mesh", "networking", "routing", "lora", "no-std"]
 categories = ["network-programming", "embedded", "no-std"]
 
 [dependencies]
-blake2 = { version = "0.11.0", default-features = false }
-ed25519-dalek = { version = "3.0.0", default-features = false }
-x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets"] }
-zeroize = { version = "1.9.1", default-features = false }
+# The versions snow uses, so firmware carries one copy of each primitive.
+blake2 = { version = "0.10.6", default-features = false }
+ed25519-dalek = { version = "2.2.0", default-features = false }
+snow = { version = "0.10.0", default-features = false, features = ["default-resolver", "use-curve25519", "use-chacha20poly1305", "use-blake2"] }
+x25519-dalek = { version = "2.0.1", default-features = false, features = ["static_secrets"] }
+zeroize = { version = "1.9.1", default-features = false, features = ["alloc"] }

@@ -102,7 +102,7 @@ async fn main(spawner: Spawner) -> ! {
         .expect("failed to set the ESP-NOW channel");
     let (_manager, sender, receiver) = esp_now.split();
 
-    let mut router = Router::new(id, KeyRing::new(&mesh_key), Config::default(), seed);
+    let mut router = Router::new(identity, KeyRing::new(&mesh_key), Config::default(), seed);
     router.add_hue(espnow::hue_info(ESPNOW_HUE));
 
     spawner.spawn(espnow_receive_task(receiver).expect("task already running"));

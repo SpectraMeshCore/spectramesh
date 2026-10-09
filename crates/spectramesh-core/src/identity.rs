@@ -11,7 +11,7 @@
 
 use core::fmt;
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto;
 use crate::node::NodeId;
@@ -54,7 +54,7 @@ impl Identity {
     /// random number generator the first time, then store them.
     pub fn from_secret(secret: [u8; 32]) -> Self {
         let mut ed_seed = crypto::derive_key(&secret, "SpectraMesh ed25519 v1");
-        let mut x_seed = crypto::derive_key(&secret, "SpectraMesh x25519 v1");
+        let mut x_seed = x25519_secret(&secret);
         let ed25519 = ed25519_dalek::SigningKey::from_bytes(&ed_seed)
             .verifying_key()
             .to_bytes();
@@ -80,6 +80,15 @@ impl Identity {
     pub fn node_id(&self) -> NodeId {
         self.public.node_id()
     }
+
+    /// The X25519 private key, for end-to-end handshakes.
+    pub(crate) fn x25519_secret(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(x25519_secret(&self.secret))
+    }
+}
+
+fn x25519_secret(secret: &[u8; 32]) -> [u8; 32] {
+    crypto::derive_key(secret, "SpectraMesh x25519 v1")
 }
 
 impl Drop for Identity {

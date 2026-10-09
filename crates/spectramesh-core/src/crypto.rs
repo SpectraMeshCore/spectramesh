@@ -67,6 +67,27 @@ impl Random {
     }
 }
 
+impl Random {
+    /// 32 bytes from this generator: a seed for another one.
+    pub(crate) fn next_seed(&mut self) -> [u8; 32] {
+        let mut seed = [0u8; 32];
+        for chunk in seed.chunks_exact_mut(8) {
+            chunk.copy_from_slice(&self.next_u64().to_be_bytes());
+        }
+        seed
+    }
+}
+
+impl snow::types::Random for Random {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), snow::Error> {
+        for chunk in dest.chunks_mut(8) {
+            let bytes = self.next_u64().to_be_bytes();
+            chunk.copy_from_slice(&bytes[..chunk.len()]);
+        }
+        Ok(())
+    }
+}
+
 impl Drop for Random {
     fn drop(&mut self) {
         zeroize::Zeroize::zeroize(&mut self.seed);

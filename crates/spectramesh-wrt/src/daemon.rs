@@ -1,9 +1,10 @@
-//! The daemon: one thread per hue receiving frames, and the router thread.
+//! The daemon: one thread per hue receiving frames, one reading the TUN
+//! device if there is one, and the router thread.
 //!
-//! Receive threads block on their sockets and pass frames over a channel. The
-//! router thread owns the [`Router`], waits on that channel until the
-//! router's next timer, and sends frames itself (sockets are safe to send on
-//! from one thread while another receives).
+//! The reading threads block on their sockets or device and pass what they
+//! read over a channel. The router thread owns the [`Router`], waits on that
+//! channel until the router's next timer, and sends frames and writes packets
+//! itself (it's safe to write from one thread while another reads).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -16,6 +17,7 @@ use log::{debug, error, info, warn};
 use spectramesh_core::{Error, HueId, Instant, NodeId, Router};
 
 use crate::link::{BROADCAST_MAC, EthernetSocket, Mac};
+use crate::tun::{Prefix, Tun, addresses};
 
 /// A hue ready to run: its router ID, its socket and its device's name.
 pub struct Hue {
@@ -24,15 +26,25 @@ pub struct Hue {
     pub socket: Arc<EthernetSocket>,
 }
 
-struct Received {
-    hue: HueId,
-    src_mac: Mac,
-    frame: Vec<u8>,
+enum Event {
+    /// A frame received on a hue.
+    Frame {
+        hue: HueId,
+        src_mac: Mac,
+        frame: Vec<u8>,
+    },
+    /// A packet the kernel routed into the TUN device.
+    Packet(Vec<u8>),
 }
 
-/// Runs until every receive thread has stopped, which only happens on errors.
-pub fn run(mut router: Router, hues: Vec<Hue>, report_interval: Duration) -> io::Error {
-    let (inbox, received) = mpsc::channel();
+/// Runs until every reading thread has stopped, which only happens on errors.
+pub fn run(
+    mut router: Router,
+    hues: Vec<Hue>,
+    tun: Option<(Tun, Prefix)>,
+    report_interval: Duration,
+) -> io::Error {
+    let (inbox, events) = mpsc::channel();
     for hue in &hues {
         let (id, device, socket, inbox) = (
             hue.id,
@@ -42,6 +54,18 @@ pub fn run(mut router: Router, hues: Vec<Hue>, report_interval: Duration) -> io:
         );
         thread::spawn(move || receive(id, &device, &socket, &inbox));
     }
+    let mut tun = match tun {
+        Some((tun, prefix)) => {
+            let reader = match tun.try_clone() {
+                Ok(reader) => reader,
+                Err(err) => return err,
+            };
+            let inbox = inbox.clone();
+            thread::spawn(move || read_tun(reader, &inbox));
+            Some((tun, prefix, prefix.address(router.id()).octets()))
+        }
+        None => None,
+    };
     drop(inbox);
 
     let start = std::time::Instant::now();
@@ -56,21 +80,30 @@ pub fn run(mut router: Router, hues: Vec<Hue>, report_interval: Duration) -> io:
     loop {
         let wakeup = router.next_wakeup().min(next_report);
         let timeout = Duration::from_millis(wakeup.as_millis().saturating_sub(now().as_millis()));
-        match received.recv_timeout(timeout) {
-            Ok(frame) => match router.handle_frame(frame.hue, &frame.frame, now()) {
+        match events.recv_timeout(timeout) {
+            Ok(Event::Frame {
+                hue,
+                src_mac,
+                frame,
+            }) => match router.handle_frame(hue, &frame, now()) {
                 Ok(Some(sender)) => {
-                    macs.insert((frame.hue, sender), frame.src_mac);
+                    macs.insert((hue, sender), src_mac);
                 }
                 Ok(None) => {}
                 // Outsiders and damaged frames are worth knowing about.
                 Err(err @ (Error::BadTag | Error::Replay)) => {
-                    warn!("dropped a frame on hue {}: {err}", frame.hue.0);
+                    warn!("dropped a frame on hue {}: {err}", hue.0);
                 }
-                Err(err) => debug!("dropped a frame on hue {}: {err}", frame.hue.0),
+                Err(err) => debug!("dropped a frame on hue {}: {err}", hue.0),
             },
+            Ok(Event::Packet(packet)) => {
+                if let Some((_, prefix, own)) = &tun {
+                    send_packet(&mut router, *prefix, own, &packet, now());
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
-                return io::Error::other("every receive thread has stopped");
+                return io::Error::other("every reading thread has stopped");
             }
         }
 
@@ -88,10 +121,24 @@ pub fn run(mut router: Router, hues: Vec<Hue>, report_interval: Duration) -> io:
                 warn!("sending on {} failed: {err}", hue.device);
             }
         }
-        // TODO: hand deliveries to applications (for example, IP traffic
-        // through a TUN device) instead of logging them.
         while let Some(delivery) = router.poll_delivery() {
-            info!("{} bytes from {}", delivery.payload.len(), delivery.src);
+            match &mut tun {
+                // Only end-to-end data, from the node its source address names.
+                Some((device, prefix, own)) if delivery.sender_keys.is_some() => {
+                    let genuine = addresses(&delivery.payload).is_some_and(|(src, dst)| {
+                        prefix.node(&src) == Some(delivery.src) && &dst == own
+                    });
+                    if !genuine {
+                        debug!(
+                            "dropped a packet from {} with the wrong addresses",
+                            delivery.src
+                        );
+                    } else if let Err(err) = device.write_packet(&delivery.payload) {
+                        warn!("writing to {} failed: {err}", device.name);
+                    }
+                }
+                _ => info!("{} bytes from {}", delivery.payload.len(), delivery.src),
+            }
         }
 
         if now() >= next_report {
@@ -101,14 +148,51 @@ pub fn run(mut router: Router, hues: Vec<Hue>, report_interval: Duration) -> io:
     }
 }
 
-fn receive(hue: HueId, device: &str, socket: &EthernetSocket, inbox: &mpsc::Sender<Received>) {
+/// Sends an IPv6 packet from this host to the node its destination names.
+fn send_packet(router: &mut Router, prefix: Prefix, own: &[u8; 16], packet: &[u8], now: Instant) {
+    // Only this node's own mesh address may send into the mesh; the kernel
+    // also routes things like link-local multicast here, which stay local.
+    let Some((src, dst)) = addresses(packet) else {
+        return;
+    };
+    let Some(node) = prefix.node(&dst) else {
+        return;
+    };
+    if &src != own || node == router.id() {
+        return;
+    }
+    if let Err(err) = router.send(node, packet, now) {
+        // TODO: answer with ICMPv6 unreachable or packet-too-big messages.
+        debug!("dropped a {}-byte packet for {node}: {err}", packet.len());
+    }
+}
+
+fn read_tun(mut tun: Tun, inbox: &mpsc::Sender<Event>) {
+    let mut buf = vec![0; 65_536];
+    loop {
+        match tun.read_packet(&mut buf) {
+            Ok(packet) => {
+                if inbox.send(Event::Packet(packet.to_vec())).is_err() {
+                    return;
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                error!("reading {} failed: {err}", tun.name);
+                return;
+            }
+        }
+    }
+}
+
+fn receive(hue: HueId, device: &str, socket: &EthernetSocket, inbox: &mpsc::Sender<Event>) {
     let mut buf = vec![0; 65_536];
     loop {
         match socket.recv(&mut buf) {
             Ok(Some((src_mac, frame))) => {
                 let frame = frame.to_vec();
                 if inbox
-                    .send(Received {
+                    .send(Event::Frame {
                         hue,
                         src_mac,
                         frame,
