@@ -22,6 +22,8 @@ use spectramesh_esp::{espnow, identity_store};
 
 extern crate alloc;
 
+use alloc::boxed::Box;
+
 // The app descriptor the ESP-IDF bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -44,7 +46,7 @@ static ESPNOW_OUTBOX: Outbox = Outbox::new();
 static OUTBOXES: [(HueId, &Outbox); 1] = [(ESPNOW_HUE, &ESPNOW_OUTBOX)];
 
 #[embassy_executor::task]
-async fn mesh_task(router: Router) -> ! {
+async fn mesh_task(router: Box<Router>) -> ! {
     mesh::run(router, &OUTBOXES).await
 }
 
@@ -107,7 +109,8 @@ async fn main(spawner: Spawner) -> ! {
 
     spawner.spawn(espnow_receive_task(receiver).expect("task already running"));
     spawner.spawn(espnow_send_task(sender).expect("task already running"));
-    spawner.spawn(mesh_task(router).expect("task already running"));
+    // Boxed: the router is too big to pass on a microcontroller's stack.
+    spawner.spawn(mesh_task(Box::new(router)).expect("task already running"));
     info!("SpectraMesh node {id} running on ESP-NOW channel {ESPNOW_CHANNEL}");
 
     // Wi-Fi stays up while `wifi` and `_manager` live, so main never returns.

@@ -232,6 +232,14 @@ pub enum Tlv {
     /// A node's public keys. Receivers check them against the node ID they
     /// asked for, so relays can't substitute other keys.
     Identity(PublicIdentity),
+    /// Proof that the node with `keys` issued `seqno` for its own route: its
+    /// Ed25519 signature. Updates with a newer seqno than any proven one are
+    /// ignored, so members can't forge seqnos to hijack routes.
+    SeqnoProof {
+        keys: PublicIdentity,
+        seqno: u16,
+        signature: [u8; 64],
+    },
 }
 
 impl Tlv {
@@ -244,6 +252,7 @@ impl Tlv {
     const CHALLENGE_REPLY: u8 = 7;
     const IDENTITY_REQUEST: u8 = 8;
     const IDENTITY: u8 = 9;
+    const SEQNO_PROOF: u8 = 10;
 
     /// Bytes this TLV takes in a frame, including its type and length.
     pub fn encoded_len(&self) -> usize {
@@ -260,6 +269,7 @@ impl Tlv {
             Tlv::ChallengeRequest { .. } | Tlv::ChallengeReply { .. } => 8,
             Tlv::IdentityRequest { .. } => 9,
             Tlv::Identity(_) => 64,
+            Tlv::SeqnoProof { .. } => 130,
         }
     }
 
@@ -274,6 +284,7 @@ impl Tlv {
             Tlv::ChallengeReply { .. } => Self::CHALLENGE_REPLY,
             Tlv::IdentityRequest { .. } => Self::IDENTITY_REQUEST,
             Tlv::Identity(_) => Self::IDENTITY,
+            Tlv::SeqnoProof { .. } => Self::SEQNO_PROOF,
         }
     }
 
@@ -325,6 +336,16 @@ impl Tlv {
             Tlv::Identity(public) => {
                 buf.extend_from_slice(&public.ed25519);
                 buf.extend_from_slice(&public.x25519);
+            }
+            Tlv::SeqnoProof {
+                keys,
+                seqno,
+                signature,
+            } => {
+                buf.extend_from_slice(&keys.ed25519);
+                buf.extend_from_slice(&keys.x25519);
+                buf.extend_from_slice(&seqno.to_be_bytes());
+                buf.extend_from_slice(&signature);
             }
         }
     }
@@ -399,10 +420,15 @@ impl Tlv {
             }
             Self::IDENTITY => {
                 need(64)?;
-                Tlv::Identity(PublicIdentity {
-                    ed25519: body[..32].try_into().expect("32 bytes"),
-                    x25519: body[32..64].try_into().expect("32 bytes"),
-                })
+                Tlv::Identity(public_at(body))
+            }
+            Self::SEQNO_PROOF => {
+                need(130)?;
+                Tlv::SeqnoProof {
+                    keys: public_at(body),
+                    seqno: u16_at(body, 64),
+                    signature: body[66..130].try_into().expect("64 bytes"),
+                }
             }
             _ => return Ok(None),
         };
@@ -449,6 +475,13 @@ fn node_at(buf: &[u8], at: usize) -> NodeId {
             .try_into()
             .expect("slice is 8 bytes"),
     )
+}
+
+fn public_at(buf: &[u8]) -> PublicIdentity {
+    PublicIdentity {
+        ed25519: buf[..32].try_into().expect("32 bytes"),
+        x25519: buf[32..64].try_into().expect("32 bytes"),
+    }
 }
 
 fn u16_at(buf: &[u8], at: usize) -> u16 {
@@ -551,6 +584,14 @@ mod tests {
                 ed25519: [1; 32],
                 x25519: [2; 32],
             }),
+            Tlv::SeqnoProof {
+                keys: PublicIdentity {
+                    ed25519: [3; 32],
+                    x25519: [4; 32],
+                },
+                seqno: 77,
+                signature: [5; 64],
+            },
         ];
         let bytes = control_frame(&sent);
         let expected_len = CONTROL_OVERHEAD + sent.iter().map(Tlv::encoded_len).sum::<usize>();

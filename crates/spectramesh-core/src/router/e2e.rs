@@ -206,7 +206,7 @@ impl Router {
         }
     }
 
-    fn remember_identity(&mut self, public: PublicIdentity, now: Instant) {
+    pub(super) fn remember_identity(&mut self, public: PublicIdentity, now: Instant) {
         let node = public.node_id();
         if !self.identities.contains_key(&node) && self.identities.len() >= IDENTITY_CACHE_LEN {
             let oldest = self

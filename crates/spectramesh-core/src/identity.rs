@@ -35,6 +35,15 @@ impl PublicIdentity {
         id.copy_from_slice(&self.hash()[..NodeId::LEN]);
         NodeId(id)
     }
+
+    /// Whether `signature` is this node's Ed25519 signature over `message`.
+    pub fn verify(&self, message: &[u8], signature: &[u8; 64]) -> bool {
+        let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&self.ed25519) else {
+            return false;
+        };
+        let signature = ed25519_dalek::Signature::from_bytes(signature);
+        key.verify_strict(message, &signature).is_ok()
+    }
 }
 
 impl fmt::Debug for PublicIdentity {
@@ -79,6 +88,15 @@ impl Identity {
 
     pub fn node_id(&self) -> NodeId {
         self.public.node_id()
+    }
+
+    /// Signs `message` with this node's Ed25519 key.
+    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer;
+        let seed = Zeroizing::new(crypto::derive_key(&self.secret, "SpectraMesh ed25519 v1"));
+        ed25519_dalek::SigningKey::from_bytes(&seed)
+            .sign(message)
+            .to_bytes()
     }
 
     /// The X25519 private key, for end-to-end handshakes.
@@ -127,6 +145,18 @@ mod tests {
         other = public;
         other.ed25519[31] ^= 1;
         assert_ne!(public.node_id(), other.node_id());
+    }
+
+    #[test]
+    fn signatures_verify_only_for_their_signer_and_message() {
+        let (a, b) = (
+            Identity::from_secret([1; 32]),
+            Identity::from_secret([2; 32]),
+        );
+        let signature = a.sign(b"seqno 5");
+        assert!(a.public().verify(b"seqno 5", &signature));
+        assert!(!a.public().verify(b"seqno 6", &signature));
+        assert!(!b.public().verify(b"seqno 5", &signature));
     }
 
     #[test]

@@ -14,6 +14,7 @@
 //! ([`session`](crate::session)).
 
 mod e2e;
+mod proofs;
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
@@ -116,6 +117,8 @@ struct HueState {
     next_update: Instant,
     /// Whether this hue's first hello, which asks neighbors for their routes, went out.
     announced: bool,
+    /// Whether the next full update carries seqno proofs, for a new neighbor.
+    send_proofs: bool,
 }
 
 pub struct Router {
@@ -133,8 +136,13 @@ pub struct Router {
     /// When this node last answered a challenge from an unverified neighbor.
     /// Those frames could be replays, so answers are rate-limited.
     challenge_answers: BTreeMap<(NodeId, HueId), Instant>,
-    /// The seqno of this node's route to itself.
+    /// The seqno of this node's route to itself, and this node's signature on it.
     seqno: u16,
+    seqno_signature: [u8; 64],
+    /// The newest proven seqno for each destination.
+    proofs: BTreeMap<NodeId, proofs::Proof>,
+    /// When each destination's proof was last asked for.
+    proof_requests: BTreeMap<NodeId, Instant>,
     hues: Vec<HueState>,
     neighbors: NeighborTable,
     routes: RouteTable,
@@ -175,9 +183,14 @@ impl Router {
     pub fn new(identity: Identity, keys: KeyRing, config: Config, seed: [u8; 32]) -> Self {
         let mut random = Random::new(seed);
         let boot_index = random.next_u32();
+        let id = identity.node_id();
+        let seqno_signature = identity.sign(&proofs::seqno_message(id, 0));
         Router {
-            id: identity.node_id(),
+            id,
             identity,
+            seqno_signature,
+            proofs: BTreeMap::new(),
+            proof_requests: BTreeMap::new(),
             config,
             keys,
             random,
@@ -228,6 +241,7 @@ impl Router {
                 next_hello: Instant::default(),
                 next_update: Instant::default(),
                 announced: false,
+                send_proofs: true,
             }),
         }
     }
@@ -399,6 +413,7 @@ impl Router {
         if let Some(state) = self.hues.iter_mut().find(|h| h.info.id == hue) {
             state.next_hello = now;
             state.next_update = now;
+            state.send_proofs = true;
         }
         let request = Tlv::RouteRequest {
             dest: NodeId::BROADCAST,
@@ -470,6 +485,7 @@ impl Router {
         self.recent_requests
             .retain(|_, &mut (_, sent)| now < sent + hold);
         self.reassembly.expire(now);
+        self.expire_proofs(now);
         let peer_timeout = self.config.peer_timeout;
         self.peers
             .retain(|_, peer| now < peer.last_heard + peer_timeout);
@@ -529,6 +545,7 @@ impl Router {
                 if dest.is_broadcast() {
                     if let Some(state) = self.hues.iter_mut().find(|h| h.info.id == hue) {
                         state.next_update = now;
+                        state.send_proofs = true;
                     }
                 } else {
                     self.triggered.insert(dest);
@@ -548,6 +565,11 @@ impl Router {
                 self.handle_identity_request(from, hue, node, hop_count, now)
             }
             Tlv::Identity(public) => self.handle_identity(public, now),
+            Tlv::SeqnoProof {
+                keys,
+                seqno,
+                signature,
+            } => self.handle_seqno_proof(keys, seqno, signature, now),
         }
     }
 
@@ -563,6 +585,11 @@ impl Router {
         now: Instant,
     ) {
         if dest == self.id {
+            return;
+        }
+        // Only the destination can raise its seqno; wait for its proof.
+        if !self.is_proven(dest, seqno) {
+            self.request_proof(from, hue, dest, now);
             return;
         }
         let feasible = self.sources.is_feasible(dest, seqno, metric);
@@ -603,6 +630,7 @@ impl Router {
         if dest == self.id {
             if seqno_newer(seqno, self.seqno) {
                 self.seqno = seqno;
+                self.sign_seqno();
             }
             self.triggered.insert(dest);
             return;
@@ -737,12 +765,18 @@ impl Router {
         }
 
         let mut dests = self.triggered.clone();
+        let mut with_proofs = false;
         if now >= self.hues[index].next_update {
             self.hues[index].next_update = now + info.update_interval;
+            with_proofs = core::mem::take(&mut self.hues[index].send_proofs);
             dests.insert(self.id);
             dests.extend(self.selected.keys());
         }
         for dest in dests {
+            // A proof goes first, so the receiver can accept the update after it.
+            if with_proofs || self.triggered.contains(&dest) {
+                tlvs.extend(self.proof_for(dest));
+            }
             tlvs.push(self.update_for(dest, info.update_interval, now));
         }
         tlvs.extend_from_slice(&self.requests);
@@ -1439,7 +1473,7 @@ mod tests {
         let now = simulate(&mut routers, &links, Instant::default(), secs(10));
         // A small hue, so the broadcast below is fragmented.
         for router in &mut routers {
-            router.add_hue(HueInfo { mtu: 100, ..wifi() });
+            router.add_hue(HueInfo { mtu: 200, ..wifi() });
         }
         routers[0].send(NodeId::BROADCAST, &[7; 500], now).unwrap();
         let mut frames = Vec::new();
@@ -1455,6 +1489,45 @@ mod tests {
         assert_eq!(routers[1].reassembly.len(), 1);
         routers[1].poll(now + fragment::REASSEMBLY_TIMEOUT);
         assert!(routers[1].reassembly.is_empty());
+    }
+
+    #[test]
+    fn members_cannot_forge_seqnos_to_hijack_routes() {
+        // A - B - C, and a malicious member M plugged into A.
+        let mut routers = [
+            router(1, &[wifi()]),
+            router(2, &[wifi()]),
+            router(3, &[wifi()]),
+            router(4, &[wifi()]),
+        ];
+        let links = [(0, 1, WIFI), (1, 2, WIFI), (0, 3, WIFI)];
+        let now = simulate(&mut routers, &links, Instant::default(), secs(20));
+        let (b, c) = (routers[1].id(), routers[2].id());
+        let c_keys = *routers[2].public_identity();
+        let c_seqno = routers[0].route_to(c).unwrap().seqno;
+
+        // M claims C at cost 0 with a newer seqno: first with no proof, then
+        // with a "proof" it signed itself.
+        let forged = c_seqno.wrapping_add(10);
+        let fake_proof = Tlv::SeqnoProof {
+            keys: c_keys,
+            seqno: forged,
+            signature: routers[3].identity.sign(&proofs::seqno_message(c, forged)),
+        };
+        let lie = Tlv::Update {
+            dest: c,
+            seqno: forged,
+            metric: 0,
+            interval: secs(16),
+        };
+        routers[3].send_control(WIFI, NodeId::BROADCAST, &[lie]);
+        routers[3].send_control(WIFI, NodeId::BROADCAST, &[fake_proof, lie]);
+        simulate(&mut routers, &links, now, secs(5));
+
+        let route = routers[0].route_to(c).unwrap();
+        assert_eq!(route.next_hop, b);
+        assert!(!seqno_newer(route.seqno, c_seqno));
+        assert!(!routers[0].is_proven(c, forged));
     }
 
     #[test]

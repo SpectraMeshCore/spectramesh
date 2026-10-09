@@ -4,6 +4,7 @@
 //! [`INBOX`], and a send task, which reads frames from its own [`Outbox`].
 //! The router task owns the [`Router`] and is the only code that touches it.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use embassy_futures::select::{Either, select};
@@ -36,7 +37,7 @@ pub fn now() -> Instant {
 }
 
 /// Runs the router forever. `outboxes` names the channel each hue's send task reads.
-pub async fn run(mut router: Router, outboxes: &'static [(HueId, &'static Outbox)]) -> ! {
+pub async fn run(mut router: Box<Router>, outboxes: &'static [(HueId, &'static Outbox)]) -> ! {
     let mut next_report = embassy_time::Instant::now() + REPORT_INTERVAL;
     loop {
         // Wake for the router's timers, a received frame, or the next report.
