@@ -1,6 +1,6 @@
 # spectramesh-core
 
-The routing engine for [SpectraMesh](https://github.com/SpectraMeshCore/spectramesh). It decides which neighbor, and which **hue** (2.4 GHz or 5.8 GHz Wi-Fi, a sub-GHz link such as 915 MHz HaLow, FSK or LoRa, ESP-NOW, or IP), each packet should take.
+The routing engine for [SpectraMesh](https://github.com/SpectraMeshCore/spectramesh). It decides which neighbor, and which **hue** (2.4 GHz or 5.8 GHz Wi-Fi, a sub-GHz link such as 915 MHz HaLow, FSK or LoRa, ESP-NOW, Ethernet or fiber, or IP), each packet should take.
 
 - **`no_std`**: needs only an allocator, so the same code runs on ESP32, OpenWRT routers and desktops.
 - **Sans-IO**: no radios, sockets, threads or clocks. Platform crates pass in received frames and the current time, and send the frames it returns.
@@ -16,9 +16,23 @@ It follows [Babel](https://www.rfc-editor.org/rfc/rfc8966) (RFC 8966), a loop-fr
 
 ### Link cost
 
-A link's cost is its **expected transmission time** in microseconds: how many tries a packet takes, counting both directions, times how long a 100-byte frame takes on that hue. A perfect 20 Mbit/s Wi-Fi hop costs 40 and a 250 kbit/s sub-GHz hop costs 3,200. Routes prefer fast hues, use long-range ones where nothing else reaches, and can mix hues hop by hop.
+A link's cost is its **expected transmission time** in microseconds: how many tries a packet takes, counting both directions, times how long a 100-byte frame takes on that hue. A gigabit Ethernet or fiber hop costs 1, a perfect 20 Mbit/s Wi-Fi hop 40 and a 250 kbit/s sub-GHz hop 3,200. Routes prefer fast hues, use long-range ones where nothing else reaches, and can mix hues hop by hop.
 
-Routing only looks at a hue's bitrate, MTU and timers, never its band. A 915 MHz radio running HaLow or FSK is simply a slower backbone link.
+Routing only looks at a hue's bitrate, MTU, timers and link model, never its band. A 915 MHz radio running HaLow or FSK is simply a slower backbone link.
+
+### Wired links
+
+Ethernet, fiber and IP hues use the **reliable** link model, as Babel does for wired links. Radios use the **lossy** one.
+
+| | Lossy (radio) | Reliable (wired) |
+|---|---|---|
+| Cost | Rises with the share of hellos lost | Fixed while the link is up |
+| Down after | 4 hellos in a row are lost | 2 of the last 3 hellos are lost |
+| One lost hello | Raises the cost | No effect |
+
+So cabled nodes always route over the cable where it reaches, a single dropped hello never moves traffic, and a cut cable is noticed within about 10 seconds, after which traffic falls back to radio.
+
+On switched networks, the platform can unicast instead of broadcasting: every frame the router hands back names its next hop, and `packet::control_sender` tells the platform which link-layer address belongs to which node.
 
 ## Using it
 
@@ -29,11 +43,12 @@ let mut router = Router::new(NodeId::from_u32(0x1234_5678), Config::default());
 // Timers are picked from the bitrate; change the fields to override them.
 router.add_hue(HueInfo::new(HueId(0), HueKind::Wifi { freq_mhz: 2437 }, 1400, 20_000_000));
 router.add_hue(HueInfo::new(HueId(1), HueKind::Fsk { freq_khz: 915_000 }, 255, 250_000));
+router.add_hue(HueInfo::new(HueId(2), HueKind::Ethernet, 1500, 1_000_000_000));
 
 // In the platform's event loop:
 // router.handle_frame(hue, &frame, now)?;     for every frame a radio receives
 // router.poll(now);                          at or after router.next_wakeup()
-// while let Some(tx) = router.poll_transmit() { /* send tx.frame on tx.hue */ }
+// while let Some(tx) = router.poll_transmit() { /* send tx.frame on tx.hue, to tx.next_hop */ }
 // while let Some(packet) = router.poll_delivery() { /* hand to the app */ }
 ```
 
@@ -53,5 +68,7 @@ Each is marked with a `TODO` in the code.
 - **Slow or airtime-limited hues** (LoRa, EU 868 MHz duty cycles) should use on-demand routing within an airtime budget instead of Babel on slow timers.
 - Measured throughput per neighbor instead of a configured bitrate
 - Hysteresis, so near-equal routes don't flap
+- Split horizon on wired hues, to send smaller updates on switched networks
+- Telling 1 Gbit/s from 10 Gbit/s links apart (both cost 1)
 - Mesh-wide broadcast (today, broadcast reaches direct neighbors only)
 - Signing, encryption, and node IDs derived from public keys

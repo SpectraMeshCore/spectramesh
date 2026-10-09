@@ -90,6 +90,20 @@ impl<'a> Frame<'a> {
     }
 }
 
+/// The neighbor that sent `frame`, if it's a control frame.
+///
+/// Every neighbor sends control frames regularly, so platforms on hues with
+/// link-layer addresses can use this to learn which address belongs to which
+/// node, and then unicast frames to [`Transmit::next_hop`].
+///
+/// [`Transmit::next_hop`]: crate::router::Transmit::next_hop
+pub fn control_sender(frame: &[u8]) -> Option<NodeId> {
+    match Frame::decode(frame) {
+        Ok(Frame::Control { src, .. }) => Some(src),
+        _ => None,
+    }
+}
+
 /// Starts a control frame. Append TLVs with [`Tlv::encode`].
 pub fn encode_control_header(src: NodeId, next_hop: NodeId, buf: &mut Vec<u8>) {
     buf.push(VERSION << 4 | KIND_CONTROL);

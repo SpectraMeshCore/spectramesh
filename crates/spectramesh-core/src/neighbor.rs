@@ -6,6 +6,8 @@
 //! IHU ("I heard you"), which becomes the neighbor's **txcost**: the cost of
 //! the link away from it. A link's cost uses both, so a link that only works
 //! one way is never used.
+//!
+//! How hello losses turn into a cost depends on the hue's [`LinkModel`].
 
 use alloc::collections::BTreeMap;
 use core::time::Duration;
@@ -22,6 +24,19 @@ pub const PERFECT: u16 = 256;
 
 /// Number of recent hellos the history covers.
 const HISTORY_LEN: u32 = 16;
+
+/// How a hue's hello losses turn into a link cost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkModel {
+    /// For radios. Cost rises with the share of recent hellos lost, so a
+    /// lossy link costs more than a clean one. Unusable once four in a row are lost.
+    Lossy,
+    /// For Ethernet, fiber and IP, which rarely lose packets. The link is
+    /// either perfect or down: usable while at least 2 of the last 3 hellos
+    /// arrived. A single lost hello doesn't disturb routes, and a cut cable is
+    /// noticed after two missed hellos instead of four.
+    Reliable,
+}
 
 #[derive(Clone, Debug)]
 struct Hellos {
@@ -108,14 +123,28 @@ impl Neighbor {
         (history, (hellos.slots + missed).min(HISTORY_LEN))
     }
 
-    /// Cost of the link towards this node, from the share of recent hellos
-    /// that arrived. [`INFINITY`] once four in a row are lost.
-    pub fn rxcost(&self, now: Instant) -> u16 {
+    /// Cost of the link towards this node, from which recent hellos arrived.
+    pub fn rxcost(&self, now: Instant, model: LinkModel) -> u16 {
         let (history, slots) = self.history(now);
-        if history & 0xf == 0 {
-            return INFINITY;
+        match model {
+            LinkModel::Lossy => {
+                if history & 0xf == 0 {
+                    return INFINITY;
+                }
+                (u32::from(PERFECT) * slots / history.count_ones()) as u16
+            }
+            LinkModel::Reliable => {
+                // Only count slots since the neighbor was first heard, so a
+                // brand-new neighbor is usable after its first hello.
+                let window = slots.min(3);
+                let heard = (u32::from(history) & ((1 << window) - 1)).count_ones();
+                if window > 0 && heard >= window.min(2) {
+                    PERFECT
+                } else {
+                    INFINITY
+                }
+            }
         }
-        (u32::from(PERFECT) * slots / history.count_ones()) as u16
     }
 
     /// Cost of the link away from this node, as the neighbor last reported it.
@@ -130,8 +159,8 @@ impl Neighbor {
 
     /// Expected transmissions per delivered packet, counting both directions,
     /// ×256 (256 is a perfect link). `None` if the link is unusable.
-    pub fn etx(&self, now: Instant) -> Option<u32> {
-        let (rx, tx) = (self.rxcost(now), self.txcost(now));
+    pub fn etx(&self, now: Instant, model: LinkModel) -> Option<u32> {
+        let (rx, tx) = (self.rxcost(now, model), self.txcost(now));
         if rx == INFINITY || tx == INFINITY {
             return None;
         }
@@ -215,6 +244,12 @@ mod tests {
 
     const INTERVAL: Duration = Duration::from_secs(1);
 
+    impl Neighbor {
+        fn rxcost_lossy(&self, now: Instant) -> u16 {
+            self.rxcost(now, LinkModel::Lossy)
+        }
+    }
+
     fn at(secs: u64) -> Instant {
         Instant::from_millis(secs * 1000)
     }
@@ -230,14 +265,14 @@ mod tests {
 
     #[test]
     fn rxcost_reflects_hello_loss() {
-        assert_eq!(steady().rxcost(at(15)), PERFECT);
+        assert_eq!(steady().rxcost_lossy(at(15)), PERFECT);
 
         let mut lossy = Neighbor::new();
         // Every other hello is lost.
         for seqno in (0..32).step_by(2) {
             lossy.record_hello(seqno, INTERVAL, at(seqno.into()));
         }
-        assert_eq!(lossy.rxcost(at(30)), 2 * PERFECT);
+        assert_eq!(lossy.rxcost_lossy(at(30)), 2 * PERFECT);
     }
 
     #[test]
@@ -245,44 +280,66 @@ mod tests {
         let mut neighbor = steady();
         neighbor.record_hello(15, INTERVAL, at(15));
         neighbor.record_hello(14, INTERVAL, at(15));
-        assert_eq!(neighbor.rxcost(at(15)), PERFECT);
+        assert_eq!(neighbor.rxcost_lossy(at(15)), PERFECT);
     }
 
     #[test]
     fn silence_makes_the_link_unusable() {
         let neighbor = steady();
         // Not yet overdue at 1.4 intervals; one lost at 1.5.
-        assert_eq!(neighbor.rxcost(Instant::from_millis(16_400)), PERFECT);
-        assert_eq!(neighbor.rxcost(Instant::from_millis(16_500)), 273);
+        assert_eq!(neighbor.rxcost_lossy(Instant::from_millis(16_400)), PERFECT);
+        assert_eq!(neighbor.rxcost_lossy(Instant::from_millis(16_500)), 273);
         // Four lost in a row.
-        assert_eq!(neighbor.rxcost(Instant::from_millis(19_500)), INFINITY);
+        assert_eq!(
+            neighbor.rxcost_lossy(Instant::from_millis(19_500)),
+            INFINITY
+        );
     }
 
     #[test]
     fn new_neighbors_are_not_penalized_for_time_before_they_were_heard() {
         let mut neighbor = Neighbor::new();
         neighbor.record_hello(0, INTERVAL, at(0));
-        assert_eq!(neighbor.rxcost(at(0)), PERFECT);
+        assert_eq!(neighbor.rxcost_lossy(at(0)), PERFECT);
         neighbor.record_hello(2, INTERVAL, at(2));
-        assert_eq!(neighbor.rxcost(at(2)), 3 * PERFECT / 2);
+        assert_eq!(neighbor.rxcost_lossy(at(2)), 3 * PERFECT / 2);
     }
 
     #[test]
     fn a_restarted_count_starts_a_fresh_history() {
         let mut neighbor = steady();
         neighbor.record_hello(0, INTERVAL, at(17));
-        assert_eq!(neighbor.rxcost(at(17)), PERFECT);
+        assert_eq!(neighbor.rxcost_lossy(at(17)), PERFECT);
         neighbor.record_hello(2, INTERVAL, at(19));
-        assert_eq!(neighbor.rxcost(at(19)), 3 * PERFECT / 2);
+        assert_eq!(neighbor.rxcost_lossy(at(19)), 3 * PERFECT / 2);
+    }
+
+    #[test]
+    fn reliable_links_ignore_a_single_lost_hello() {
+        let neighbor = steady();
+        let rxcost = |ms| neighbor.rxcost(Instant::from_millis(ms), LinkModel::Reliable);
+        assert_eq!(rxcost(15_000), PERFECT);
+        // One hello lost: still perfect, where a lossy link's cost would rise.
+        assert_eq!(rxcost(16_500), PERFECT);
+        assert!(neighbor.rxcost_lossy(Instant::from_millis(16_500)) > PERFECT);
+        // Two lost: down.
+        assert_eq!(rxcost(17_500), INFINITY);
+    }
+
+    #[test]
+    fn reliable_links_are_usable_after_the_first_hello() {
+        let mut neighbor = Neighbor::new();
+        neighbor.record_hello(0, INTERVAL, at(0));
+        assert_eq!(neighbor.rxcost(at(0), LinkModel::Reliable), PERFECT);
     }
 
     #[test]
     fn etx_needs_both_directions() {
         let mut neighbor = steady();
-        assert_eq!(neighbor.etx(at(15)), None);
+        assert_eq!(neighbor.etx(at(15), LinkModel::Lossy), None);
 
         neighbor.record_ihu(2 * PERFECT, INTERVAL, at(15));
-        assert_eq!(neighbor.etx(at(15)), Some(512));
+        assert_eq!(neighbor.etx(at(15), LinkModel::Lossy), Some(512));
         // The IHU expires after 3.5 intervals.
         assert_eq!(neighbor.txcost(Instant::from_millis(18_500)), INFINITY);
     }

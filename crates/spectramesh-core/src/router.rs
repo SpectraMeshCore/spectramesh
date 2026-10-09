@@ -50,6 +50,14 @@ impl Default for Config {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Transmit {
     pub hue: HueId,
+    /// The neighbor the frame is for, or [`NodeId::BROADCAST`]. On hues with
+    /// link-layer addresses (Ethernet, Wi-Fi, ESP-NOW), the platform can send
+    /// to that neighbor's address instead of broadcasting, which matters on a
+    /// switched network. [`packet::control_sender`] tells it which address
+    /// belongs to which node.
+    ///
+    /// [`packet::control_sender`]: crate::packet::control_sender
+    pub next_hop: NodeId,
     pub frame: Vec<u8>,
 }
 
@@ -459,8 +467,9 @@ impl Router {
         self.neighbors
             .iter()
             .filter_map(|(node, hue, neighbor)| {
-                let airtime = self.hue(hue)?.airtime_us();
-                let etx = neighbor.etx(now)?;
+                let info = self.hue(hue)?;
+                let etx = neighbor.etx(now, info.link_model)?;
+                let airtime = info.airtime_us();
                 let cost = u64::from(etx) * u64::from(airtime) / 256;
                 Some(((node, hue), cost.clamp(1, u64::from(INFINITY - 1)) as u32))
             })
@@ -488,7 +497,7 @@ impl Router {
             }
             // TODO: send IHUs every few hellos rather than every one on slow hues.
             for (neighbor, link) in self.neighbors.on_hue(info.id) {
-                let rxcost = link.rxcost(now);
+                let rxcost = link.rxcost(now, info.link_model);
                 if rxcost != neighbor::INFINITY {
                     tlvs.push(Tlv::Ihu {
                         neighbor,
@@ -542,6 +551,7 @@ impl Router {
             if frame.len() > CONTROL_HEADER_LEN && frame.len() + tlv.encoded_len() > mtu {
                 self.outbox.push_back(Transmit {
                     hue,
+                    next_hop,
                     frame: core::mem::take(&mut frame),
                 });
             }
@@ -551,7 +561,11 @@ impl Router {
             tlv.encode(&mut frame);
         }
         if !frame.is_empty() {
-            self.outbox.push_back(Transmit { hue, frame });
+            self.outbox.push_back(Transmit {
+                hue,
+                next_hop,
+                frame,
+            });
         }
     }
 
@@ -575,7 +589,11 @@ impl Router {
         let mut frame = Vec::with_capacity(DATA_HEADER_LEN + payload.len());
         header.encode(&mut frame);
         frame.extend_from_slice(payload);
-        self.outbox.push_back(Transmit { hue, frame });
+        self.outbox.push_back(Transmit {
+            hue,
+            next_hop: header.next_hop,
+            frame,
+        });
     }
 
     fn mtu(&self, hue: HueId) -> usize {
@@ -587,10 +605,12 @@ impl Router {
 mod tests {
     use super::*;
     use crate::hue::HueKind;
+    use crate::packet::control_sender;
     use alloc::vec;
 
     const WIFI: HueId = HueId(0);
     const SUB_GHZ: HueId = HueId(1);
+    const ETHERNET: HueId = HueId(2);
 
     fn wifi() -> HueInfo {
         HueInfo::new(WIFI, HueKind::Wifi { freq_mhz: 2437 }, 1400, 20_000_000)
@@ -599,6 +619,11 @@ mod tests {
     /// A 915 MHz FSK backbone link: slower than Wi-Fi, but not LoRa-slow.
     fn sub_ghz() -> HueInfo {
         HueInfo::new(SUB_GHZ, HueKind::Fsk { freq_khz: 915_000 }, 255, 250_000)
+    }
+
+    /// Gigabit Ethernet or fiber.
+    fn ethernet() -> HueInfo {
+        HueInfo::new(ETHERNET, HueKind::Ethernet, 1500, 1_000_000_000)
     }
 
     fn router(id: u32, hues: &[HueInfo]) -> Router {
@@ -693,6 +718,46 @@ mod tests {
         let sub_ghz_only = [(0, 1, SUB_GHZ)];
         simulate(&mut routers, &sub_ghz_only, now, secs(30));
         assert_eq!(next_hop(&routers[0], &routers[1]).unwrap().1, SUB_GHZ);
+    }
+
+    #[test]
+    fn prefers_wired_links_and_falls_back_to_radio() {
+        // A, B and C are cabled in a line; A and C can also hear each other on Wi-Fi.
+        let mut routers = [
+            router(1, &[ethernet(), wifi()]),
+            router(2, &[ethernet()]),
+            router(3, &[ethernet(), wifi()]),
+        ];
+        let cabled = [(0, 1, ETHERNET), (1, 2, ETHERNET), (0, 2, WIFI)];
+        let now = simulate(&mut routers, &cabled, Instant::default(), secs(30));
+        let (b, c) = (routers[1].id(), routers[2].id());
+        // Two cabled hops (cost 1 each) beat one Wi-Fi hop (cost 40).
+        let route = *routers[0].route_to(c).unwrap();
+        assert_eq!((route.next_hop, route.hue, route.metric), (b, ETHERNET, 2));
+
+        // Unplug B-C. The cut is noticed after two missed hellos, and A falls
+        // back to Wi-Fi.
+        let unplugged = [(0, 1, ETHERNET), (0, 2, WIFI)];
+        simulate(&mut routers, &unplugged, now, secs(15));
+        assert_eq!(next_hop(&routers[0], &routers[2]), Some((c, WIFI)));
+        assert_no_loops(&routers, c);
+    }
+
+    #[test]
+    fn transmits_name_their_next_hop() {
+        let mut routers = [router(1, &[ethernet()]), router(2, &[ethernet()])];
+        let links = [(0, 1, ETHERNET)];
+        simulate(&mut routers, &links, Instant::default(), secs(10));
+        let b = routers[1].id();
+
+        routers[0].send(b, b"unicast").unwrap();
+        let tx = routers[0].poll_transmit().unwrap();
+        assert_eq!(tx.next_hop, b);
+
+        routers[0].poll(Instant::from_millis(60_000));
+        let hello = routers[0].poll_transmit().unwrap();
+        assert_eq!(hello.next_hop, NodeId::BROADCAST);
+        assert_eq!(control_sender(&hello.frame), Some(routers[0].id()));
     }
 
     #[test]
