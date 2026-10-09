@@ -1,0 +1,13 @@
+# Rust
+/target/
+**/target/
+# ESP-IDF / PlatformIO
+build/
+.pio/
+sdkconfig.old
+# Node
+node_modules/
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
