@@ -122,12 +122,12 @@ impl ModemReader {
     }
 
     /// Waits for the next frame the modem's radio received. Returns its
-    /// sender's link address and the frame.
-    pub fn recv(&mut self) -> io::Result<(Mac, Vec<u8>)> {
+    /// sender's link address, the frame, and its signal strength in dBm.
+    pub fn recv(&mut self) -> io::Result<(Mac, Vec<u8>, i8)> {
         loop {
             for message in self.read_messages()? {
-                if let Ok(FromModem::Received { src, frame, .. }) = FromModem::decode(&message) {
-                    return Ok((src, frame.to_vec()));
+                if let Ok(FromModem::Received { src, frame, rssi }) = FromModem::decode(&message) {
+                    return Ok((src, frame.to_vec(), rssi));
                 }
             }
         }

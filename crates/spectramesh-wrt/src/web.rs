@@ -110,9 +110,10 @@ pub fn snapshot_json(router: &Router, hue_names: &[(u8, String)], now: Instant) 
                 LinkKind::LoRa { freq_mhz } => ("lora", freq_mhz),
                 LinkKind::Ip => ("ip", 0),
             };
+            let rssi = link.rssi.map_or("null".to_string(), |dbm| dbm.to_string());
             let _ = write!(
                 json,
-                "{{\"to\":{},\"kind\":\"{kind}\",\"freq_mhz\":{freq},\"cost\":{}}}",
+                "{{\"to\":{},\"kind\":\"{kind}\",\"freq_mhz\":{freq},\"cost\":{},\"rssi\":{rssi}}}",
                 id(link.neighbor),
                 link.cost
             );

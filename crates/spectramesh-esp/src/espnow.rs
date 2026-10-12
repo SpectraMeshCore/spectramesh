@@ -35,6 +35,7 @@ pub async fn receive(hue: HueId, mut receiver: EspNowReceiver) -> ! {
             .send(Received {
                 hue,
                 frame: received.data().to_vec(),
+                rssi: Some(received.info.rx_control.rssi.clamp(-128, 127) as i8),
             })
             .await;
     }

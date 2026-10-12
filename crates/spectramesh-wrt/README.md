@@ -65,7 +65,7 @@ Packets arriving from the mesh are only passed to the system if their source add
 
 ### The mesh map
 
-`--web 127.0.0.1:8470` serves a live map of the mesh at that address: every node and link, drawn as a graph you can drag around, with link types colored, plus tables of nodes and of this node's routes. It updates every 2 seconds and needs no internet connection. `--name` labels this node on it.
+`--web 127.0.0.1:8470` serves a live map of the mesh at that address: every node and link, drawn as a graph you can drag around, with link types colored, plus tables of nodes and of this node's routes. Radio links show their signal strength: each end reports how strongly it hears the other, the label shows the weaker direction, and weak links (below −85 dBm) are highlighted. Hover over a link for both directions. It updates every 2 seconds and needs no internet connection. `--name` labels this node on it.
 
 The map comes from **neighbor reports**: every node, ESP32s included, floods its name and links once a minute, and again shortly after it meets a new neighbor. The page is served without authentication and shows the mesh's layout, so keep it on `127.0.0.1` unless you mean to share it. `GET /api/mesh` returns the same data as JSON.
 

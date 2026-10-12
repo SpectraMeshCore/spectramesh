@@ -65,6 +65,8 @@ enum Event {
         hue: HueId,
         src_mac: Mac,
         frame: Vec<u8>,
+        /// Signal strength in dBm, if the hue measures it.
+        rssi: Option<i8>,
     },
     /// A packet the kernel routed into the TUN device.
     Packet(Vec<u8>),
@@ -142,9 +144,13 @@ pub fn run(
                 hue,
                 src_mac,
                 frame,
+                rssi,
             }) => match router.handle_frame(hue, &frame, now()) {
                 Ok(Some(sender)) => {
                     macs.insert((hue, sender), src_mac);
+                    if let Some(rssi) = rssi {
+                        router.record_signal(sender, hue, rssi);
+                    }
                 }
                 Ok(None) => {}
                 // Outsiders and damaged frames are worth knowing about.
@@ -278,12 +284,13 @@ fn read_tun(mut tun: Tun, inbox: &mpsc::Sender<Event>) {
 fn receive_modem(hue: HueId, device: &str, mut reader: ModemReader, inbox: &mpsc::Sender<Event>) {
     loop {
         match reader.recv() {
-            Ok((src_mac, frame)) => {
+            Ok((src_mac, frame, rssi)) => {
                 if inbox
                     .send(Event::Frame {
                         hue,
                         src_mac,
                         frame,
+                        rssi: Some(rssi),
                     })
                     .is_err()
                 {
@@ -304,11 +311,13 @@ fn receive(hue: HueId, device: &str, socket: &EthernetSocket, inbox: &mpsc::Send
         match socket.recv(&mut buf) {
             Ok(Some((src_mac, frame))) => {
                 let frame = frame.to_vec();
+                // Ethernet doesn't measure signal strength.
                 if inbox
                     .send(Event::Frame {
                         hue,
                         src_mac,
                         frame,
+                        rssi: None,
                     })
                     .is_err()
                 {

@@ -82,6 +82,18 @@
   #map-card { position: relative; min-height: 420px; }
   svg { display: block; width: 100%; height: 100%; min-height: 420px; touch-action: none; }
   .edge { stroke-linecap: round; }
+  .signal {
+    fill: var(--muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    text-anchor: middle;
+    paint-order: stroke;
+    stroke: var(--bg);
+    stroke-width: 3px;
+    pointer-events: none;
+  }
+  .signal.weak { fill: var(--warn); font-weight: 600; }
+  .signal.dim { opacity: 0.15; }
   .edge.one-way { stroke-dasharray: 4 4; }
   .edge.dim, .node.dim { opacity: 0.15; }
   .node circle { fill: var(--node); stroke: var(--node-stroke); stroke-width: 2; cursor: grab; }
@@ -216,6 +228,16 @@ function cost(us) {
   return us >= 1000 ? `${(us / 1000).toFixed(1)} ms` : `${us} µs`;
 }
 
+// Rules of thumb: ESP-NOW at 1 Mbit/s still receives at about -95 dBm, so
+// "weak" means at risk, not broken.
+function quality(dbm) {
+  return dbm >= -70 ? "strong" : dbm >= -85 ? "fair" : "weak";
+}
+
+function signal(dbm) {
+  return `${dbm} dBm (${quality(dbm)})`;
+}
+
 /** One edge per pair of nodes and link kind, noting whether both ends reported it. */
 function edges() {
   const found = new Map();
@@ -282,7 +304,7 @@ function render() {
   // Edges.
   const keys = new Set(all.map(e => e.key));
   for (const [key, el] of edgeEls) {
-    if (!keys.has(key)) { el.line.remove(); edgeEls.delete(key); }
+    if (!keys.has(key)) { el.line.remove(); el.label.remove(); edgeEls.delete(key); }
   }
   for (const edge of all) {
     let el = edgeEls.get(edge.key);
@@ -291,8 +313,10 @@ function render() {
       line.classList.add("edge");
       const title = document.createElementNS(SVG, "title");
       line.append(title);
-      edgeLayer.append(line);
-      el = { line, title };
+      const label = document.createElementNS(SVG, "text");
+      label.classList.add("signal");
+      edgeLayer.append(line, label);
+      el = { line, title, label };
       edgeEls.set(edge.key, el);
     }
     el.edge = edge;
@@ -300,7 +324,13 @@ function render() {
     el.line.setAttribute("stroke", `var(--${edge.kind}, var(--muted))`);
     el.line.setAttribute("stroke-width", edge.reporters.size > 1 ? 3 : 2);
     el.line.classList.toggle("one-way", edge.reporters.size < 2);
+    // Each end reports how strongly it hears the other; the weaker one limits the link.
+    const heard = edge.links.filter(l => l.rssi !== null);
+    const weakest = heard.length ? Math.min(...heard.map(l => l.rssi)) : null;
+    el.label.textContent = weakest === null ? "" : `${weakest} dBm`;
+    el.label.classList.toggle("weak", weakest !== null && quality(weakest) === "weak");
     el.title.textContent = `${label(edge.a)} – ${label(edge.b)}\n${linkLabel(edge.links[0])}, ${cost(worst)}` +
+      heard.map(l => `\n${label(l.from)} hears ${label(l.to)} at ${signal(l.rssi)}`).join("") +
       (edge.reporters.size < 2 ? "\nreported by one end only" : "");
   }
 
@@ -370,7 +400,9 @@ function applySelection() {
     state.g.classList.toggle("selected", id === selected);
   }
   for (const el of edgeEls.values()) {
-    el.line.classList.toggle("dim", Boolean(selected) && el.edge.a !== selected && el.edge.b !== selected);
+    const dim = Boolean(selected) && el.edge.a !== selected && el.edge.b !== selected;
+    el.line.classList.toggle("dim", dim);
+    el.label.classList.toggle("dim", dim);
   }
   for (const row of document.querySelectorAll("tr[data-id]")) {
     row.classList.toggle("selected", row.dataset.id === selected);
@@ -395,7 +427,10 @@ function applySelection() {
   if (route) add("Route", `via ${route.next_hop === route.dest ? "direct link" : label(route.next_hop)} on ${route.hue}, ${cost(route.cost)}`);
   if (report) {
     add("Report", `${report.age_s} s ago`);
-    for (const link of report.links) add(label(link.to), `${linkLabel(link)}, ${cost(link.cost)}`);
+    for (const link of report.links) {
+      const heard = link.rssi === null ? "" : `, heard at ${signal(link.rssi)}`;
+      add(label(link.to), `${linkLabel(link)}, ${cost(link.cost)}${heard}`);
+    }
   } else {
     add("Report", "none yet");
   }
@@ -457,6 +492,8 @@ function tick() {
     if (!a || !b) continue;
     el.line.setAttribute("x1", a.x.toFixed(1)); el.line.setAttribute("y1", a.y.toFixed(1));
     el.line.setAttribute("x2", b.x.toFixed(1)); el.line.setAttribute("y2", b.y.toFixed(1));
+    el.label.setAttribute("x", ((a.x + b.x) / 2).toFixed(1));
+    el.label.setAttribute("y", ((a.y + b.y) / 2 - 5).toFixed(1));
   }
   requestAnimationFrame(tick);
 }

@@ -18,6 +18,8 @@ use spectramesh_core::{Error, HueId, Instant, Router, Transmit};
 pub struct Received {
     pub hue: HueId,
     pub frame: Vec<u8>,
+    /// Signal strength in dBm, if the radio measures it.
+    pub rssi: Option<i8>,
 }
 
 const QUEUE_LEN: usize = 16;
@@ -42,16 +44,21 @@ pub async fn run(mut router: Box<Router>, outboxes: &'static [(HueId, &'static O
     loop {
         // Wake for the router's timers, a received frame, or the next report.
         let wakeup = to_embassy(router.next_wakeup()).min(next_report);
-        if let Either::First(received) = select(INBOX.receive(), Timer::at(wakeup)).await
-            && let Err(err) = router.handle_frame(received.hue, &received.frame, now())
-        {
-            match err {
+        if let Either::First(received) = select(INBOX.receive(), Timer::at(wakeup)).await {
+            match router.handle_frame(received.hue, &received.frame, now()) {
+                Ok(Some(sender)) => {
+                    // Only frames the router accepted count towards signal strength.
+                    if let Some(rssi) = received.rssi {
+                        router.record_signal(sender, received.hue, rssi);
+                    }
+                }
+                Ok(None) => {}
                 // Outsiders and damaged frames are worth knowing about; the
                 // rest, such as challenges to new neighbors, are routine.
-                Error::BadTag | Error::Replay => {
+                Err(err @ (Error::BadTag | Error::Replay)) => {
                     warn!("dropped a frame on hue {}: {err}", received.hue.0)
                 }
-                _ => debug!("dropped a frame on hue {}: {err}", received.hue.0),
+                Err(err) => debug!("dropped a frame on hue {}: {err}", received.hue.0),
             }
         }
 

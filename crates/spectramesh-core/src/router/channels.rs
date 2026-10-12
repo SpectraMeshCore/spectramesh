@@ -177,6 +177,7 @@ impl Router {
                     neighbor,
                     kind: self.hue(hue)?.kind.into(),
                     cost,
+                    rssi: self.neighbors.get(neighbor, hue).and_then(|n| n.rssi()),
                 })
             })
             .collect();

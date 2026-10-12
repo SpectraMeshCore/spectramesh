@@ -56,6 +56,9 @@ pub struct Neighbor {
     hellos: Option<Hellos>,
     txcost: u16,
     txcost_expires: Instant,
+    /// Smoothed signal strength of the neighbor's frames, in sixteenths of
+    /// a dBm, if the hue measures it.
+    rssi_x16: Option<i32>,
 }
 
 impl Neighbor {
@@ -64,7 +67,26 @@ impl Neighbor {
             hellos: None,
             txcost: INFINITY,
             txcost_expires: Instant::default(),
+            rssi_x16: None,
         }
+    }
+
+    /// Adds a signal strength measurement, in dBm. Measurements are
+    /// averaged, a quarter of each new one at a time, so one odd frame
+    /// doesn't swing the result.
+    fn record_rssi(&mut self, dbm: i8) {
+        let sample = i32::from(dbm) * 16;
+        self.rssi_x16 = Some(match self.rssi_x16 {
+            Some(average) => average + (sample - average) / 4,
+            None => sample,
+        });
+    }
+
+    /// How strongly this node hears the neighbor, in dBm, averaged over
+    /// recent frames. `None` if the hue doesn't measure it.
+    pub fn rssi(&self) -> Option<i8> {
+        self.rssi_x16
+            .map(|average| (average / 16).clamp(i8::MIN.into(), i8::MAX.into()) as i8)
     }
 
     fn record_hello(&mut self, seqno: u16, interval: Duration, now: Instant) {
@@ -215,6 +237,13 @@ impl NeighborTable {
         self.neighbors.get(&(node, hue))
     }
 
+    /// Records the signal strength of a frame from a known neighbor.
+    pub fn record_rssi(&mut self, node: NodeId, hue: HueId, dbm: i8) {
+        if let Some(neighbor) = self.neighbors.get_mut(&(node, hue)) {
+            neighbor.record_rssi(dbm);
+        }
+    }
+
     /// Drops neighbors with no recent hellos or IHUs. Returns true if any were dropped.
     pub fn expire(&mut self, now: Instant) -> bool {
         let before = self.neighbors.len();
@@ -347,6 +376,21 @@ mod tests {
         assert_eq!(neighbor.etx(at(15), LinkModel::Lossy), Some(512));
         // The IHU expires after 3.5 intervals.
         assert_eq!(neighbor.txcost(Instant::from_millis(18_500)), INFINITY);
+    }
+
+    #[test]
+    fn signal_strength_is_smoothed() {
+        let mut neighbor = Neighbor::new();
+        assert_eq!(neighbor.rssi(), None);
+        neighbor.record_rssi(-60);
+        assert_eq!(neighbor.rssi(), Some(-60));
+        // One outlier moves it a quarter of the way.
+        neighbor.record_rssi(-80);
+        assert_eq!(neighbor.rssi(), Some(-65));
+        for _ in 0..20 {
+            neighbor.record_rssi(-40);
+        }
+        assert_eq!(neighbor.rssi(), Some(-40));
     }
 
     #[test]

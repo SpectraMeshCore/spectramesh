@@ -279,6 +279,14 @@ impl Router {
         &self.neighbors
     }
 
+    /// Records the signal strength, in dBm, of a frame from `neighbor` on
+    /// `hue`. Platforms whose radios measure it call this for each frame
+    /// [`handle_frame`](Self::handle_frame) accepts, so forged frames can't
+    /// skew it. It's averaged and shared in neighbor reports, for the map.
+    pub fn record_signal(&mut self, neighbor: NodeId, hue: HueId, rssi_dbm: i8) {
+        self.neighbors.record_rssi(neighbor, hue, rssi_dbm);
+    }
+
     /// Selected routes, as of the last [`poll`](Self::poll).
     pub fn routes(&self) -> impl Iterator<Item = &Route> {
         self.selected.values()
@@ -1666,6 +1674,27 @@ mod tests {
                 .iter()
                 .all(|l| l.kind == crate::report::LinkKind::Wifi { freq_mhz: 2437 })
         );
+    }
+
+    #[test]
+    fn signal_strength_reaches_the_map() {
+        let (mut routers, links) = line(2);
+        for router in routers.iter_mut() {
+            router.config.report_interval = Some(secs(10));
+        }
+        let now = simulate(&mut routers, &links, Instant::default(), secs(15));
+        let (a, b) = (routers[0].id(), routers[1].id());
+        // B's radio hears A at -48 dBm; A's map should learn that.
+        routers[1].record_signal(a, WIFI, -48);
+        // Signal from a node that isn't a neighbor is ignored.
+        routers[1].record_signal(NodeId::from_u64(99), WIFI, -20);
+        simulate(&mut routers, &links, now, secs(15));
+
+        let b_report = routers[0].mesh_map().find(|r| r.node == b).unwrap();
+        let link = b_report.links.iter().find(|l| l.neighbor == a).unwrap();
+        assert_eq!(link.rssi, Some(-48));
+        let a_report = routers[0].mesh_map().find(|r| r.node == a).unwrap();
+        assert_eq!(a_report.links[0].rssi, None);
     }
 
     #[test]
