@@ -66,6 +66,28 @@ fn daemons_carry_ipv6_through_each_other_and_keep_outsiders_out() {
     }
     assert!(!map.contains(id("node 4")), "{map}");
 
+    // Programs on node 1 reach node 3 through the control sockets: on the
+    // channel, which node 2 relays without its key, and directly.
+    let channel = log
+        .lines()
+        .find_map(|l| l.strip_prefix("[node 1] info: joined channel "))
+        .unwrap_or_else(|| panic!("node 1 joined no channel:\n{log}"));
+    assert!(
+        has(&format!(
+            "[node 3 listen] {} {channel}: hello channel",
+            id("node 1")
+        )),
+        "{log}"
+    );
+    assert!(
+        has(&format!(
+            "[node 3 listen] {} direct: hello node 3",
+            id("node 1")
+        )),
+        "{log}"
+    );
+    assert!(!has("[node 2] info: joined channel"), "{log}");
+
     // The outsider is dropped by node 2 and learns nothing.
     assert!(
         has("[node 2] warning: dropped a frame on hue 2: frame tag doesn't verify"),

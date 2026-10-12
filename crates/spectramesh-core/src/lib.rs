@@ -33,6 +33,7 @@
 
 extern crate alloc;
 
+pub mod app;
 pub mod auth;
 pub mod channel;
 mod crypto;
@@ -55,7 +56,7 @@ pub use channel::{ChannelId, ChannelKey};
 pub use error::{Error, Result};
 pub use hue::{HueId, HueInfo, HueKind};
 pub use identity::{Identity, PublicIdentity};
-pub use node::NodeId;
+pub use node::{NodeId, ParseIdError};
 pub use report::{LinkKind, NodeReport, ReportedLink};
 pub use router::{Config, Delivery, MAX_PAYLOAD, Router, Transmit};
 pub use routing::Route;

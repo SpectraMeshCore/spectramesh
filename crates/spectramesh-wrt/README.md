@@ -71,11 +71,26 @@ The map comes from **neighbor reports**: every node, ESP32s included, floods its
 
 ### Channels
 
-Channels carry encrypted group messages across the whole mesh. Make a key with `spectrameshd --generate-channel-key`, give it to every member, and list it in a file passed with `--channel-key-file` (one key per line). Every node relays channel messages, but only members can read them. For now the daemon logs the messages it receives; a local interface for programs to send and receive on channels is still to come.
+Channels carry encrypted group messages across the whole mesh. Make a key with `spectrameshd --generate-channel-key`, give it to every member, and list it in a file passed with `--channel-key-file` (one key per line). Every node relays channel messages, but only members can read them.
+
+### Sending and receiving messages
+
+Programs on the same host use the mesh through the daemon's control socket, `/var/run/spectramesh.sock` (change it with `--control PATH`; only the daemon's user can open it). From the shell:
+
+```
+spectrameshd --channels                                  # the joined channels' IDs
+spectrameshd --send-channel 0e01 "hello everyone"        # the start of a channel ID is enough
+spectrameshd --send '!4c6137c0a0eb06a1' "hello you"      # one node, encrypted end to end
+spectrameshd --listen                                    # print messages as they arrive
+```
+
+`--listen` prints each message with its sender and channel, or `direct` for messages to this node alone. Only direct messages prove who sent them; any member of a channel could claim to be another.
+
+Programs can speak the socket's line protocol directly (`socat - UNIX-CONNECT:/var/run/spectramesh.sock`): `send NODE HEX`, `channel CHANNEL HEX`, `channels` and `listen`, each answered with `ok` or `error REASON`; after `listen`, arriving messages follow as `message FROM CHANNEL HEX`. See `src/control.rs`.
 
 ## Trying it without hardware
 
-`scripts/veth-demo.sh` runs four nodes, each in a throwaway network namespace of its own, joined by virtual Ethernet cables. Nodes 1 and 3 reach each other through node 2, and node 1 pings node 3's IPv6 address. Node 4 is plugged into node 2 too, but has a different mesh key. It needs no root.
+`scripts/veth-demo.sh` runs four nodes, each in a throwaway network namespace of its own, joined by virtual Ethernet cables. Nodes 1 and 3 reach each other through node 2, and node 1 pings node 3's IPv6 address. Node 4 is plugged into node 2 too, but has a different mesh key. Nodes 1 and 3 also share a channel that node 2 relays without its key, and node 1 sends node 3 a message on it and another directly, through its control socket. It needs no root.
 
 ```
 cargo build -p spectramesh-wrt
@@ -84,6 +99,8 @@ crates/spectramesh-wrt/scripts/veth-demo.sh
 
 ```
 [node 1 ping] 3 packets transmitted, 3 received, 0% packet loss, time 2003ms
+[node 3 listen] !4c6137c0a0eb06a1 0e01a144bf6c6eb0: hello channel
+[node 3 listen] !4c6137c0a0eb06a1 direct: hello node 3
 [node 1] info:   !5aced5892ccbf39d via !9149fdc63f0b6b51 on a0, cost 2 us
 [node 2] warning: dropped a frame on hue 2: frame tag doesn't verify with any mesh key
 [node 4] info: node !8b6ff553f685778c: 0 neighbor links, 0 routes
@@ -174,6 +191,7 @@ Encrypted mesh needs a full `wpad` package (such as `wpad-mbedtls`) instead of t
 | `src/keys.rs` | The node's identity file, mesh key files, and random numbers from the kernel |
 | `src/link.rs` | Raw Ethernet sockets. With `tun.rs`'s device setup and `keys.rs`'s call for random numbers, the only `unsafe` code in the project |
 | `src/tun.rs` | The TUN device for IPv6, and mesh addresses |
+| `src/control.rs` | The control socket, and the `--send`, `--listen` and `--channels` client commands |
 | `src/daemon.rs` | One receive thread per hue and one for the TUN device, plus the router thread, which also learns neighbors' MAC addresses from frames the router has authenticated |
 | `openwrt/` | The package Makefile, the procd init script and the default UCI config |
 | `scripts/veth-demo.sh` | The four-node demo, with a ping over the mesh |
@@ -182,7 +200,6 @@ It uses plain threads, with no async runtime, to keep the binary small for route
 
 ## Next steps
 
-- **A local interface** (such as a Unix socket) for programs to send and receive on channels
 - **Routing a whole LAN's traffic**, so devices behind a router reach the mesh without running SpectraMesh themselves
 - **A UDP hue**, for linking sites over the internet or networks SpectraMesh doesn't control
 - **Status over ubus**, and a LuCI page

@@ -40,7 +40,7 @@ use zeroize::Zeroize;
 use crate::auth::{KeyTextError, key_from_text, key_to_text};
 use crate::crypto;
 use crate::error::{Error, Result};
-use crate::node::NodeId;
+use crate::node::{NodeId, ParseIdError, parse_hex_id};
 
 const KEY_PREFIX: &str = "smc1-";
 const KEY_CHECKSUM: &str = "SpectraMesh channel key checksum v1";
@@ -64,6 +64,15 @@ impl fmt::Display for ChannelId {
             write!(f, "{byte:02x}")?;
         }
         Ok(())
+    }
+}
+
+/// Parses a channel ID as [`Display`](fmt::Display) prints it: 16 hex digits.
+impl core::str::FromStr for ChannelId {
+    type Err = ParseIdError;
+
+    fn from_str(text: &str) -> core::result::Result<Self, Self::Err> {
+        parse_hex_id(text).map(ChannelId)
     }
 }
 

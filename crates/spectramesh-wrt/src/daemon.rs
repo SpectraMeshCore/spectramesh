@@ -1,5 +1,6 @@
 //! The daemon: one thread per hue receiving frames, one reading the TUN
-//! device if there is one, and the router thread.
+//! device if there is one, threads serving the control socket, and the
+//! router thread.
 //!
 //! The reading threads block on their sockets or device and pass what they
 //! read over a channel. The router thread owns the [`Router`], waits on that
@@ -8,14 +9,17 @@
 
 use std::collections::BTreeMap;
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
 use log::{debug, error, info, warn};
-use spectramesh_core::{Error, HueId, Instant, NodeId, Router};
+use spectramesh_core::app::{self, Payload};
+use spectramesh_core::{Delivery, Error, HueId, Instant, MAX_PAYLOAD, NodeId, Router};
 
+use crate::control::{self, Command, Request};
 use crate::icmp;
 use crate::link::{BROADCAST_MAC, EthernetSocket, Mac};
 use crate::modem::{Modem, ModemReader};
@@ -70,6 +74,15 @@ enum Event {
     },
     /// A packet the kernel routed into the TUN device.
     Packet(Vec<u8>),
+    /// A command from a program, through the control socket.
+    Control(Command),
+}
+
+/// Where the control socket goes, and whether the path was chosen on the
+/// command line (if so, failing to open it is an error; if not, a warning).
+pub struct ControlSocket {
+    pub path: PathBuf,
+    pub configured: bool,
 }
 
 /// Runs until every reading thread has stopped, which only happens on errors.
@@ -79,8 +92,28 @@ pub fn run(
     tun: Option<(Tun, Prefix)>,
     snapshot: Option<Snapshot>,
     report_interval: Duration,
+    control: ControlSocket,
 ) -> io::Error {
     let (inbox, events) = mpsc::channel();
+    let submit = {
+        let inbox = inbox.clone();
+        move |command| inbox.send(Event::Control(command)).is_ok()
+    };
+    match control::serve(&control.path, submit) {
+        Ok(()) => {}
+        Err(err) if control.configured => {
+            return io::Error::new(
+                err.kind(),
+                format!("control socket {}: {err}", control.path.display()),
+            );
+        }
+        Err(err) => warn!(
+            "no control socket: {}: {err} (choose another place with --control)",
+            control.path.display()
+        ),
+    }
+    // Programs listening for messages, through the control socket.
+    let mut listeners: Vec<mpsc::Sender<String>> = Vec::new();
     let mut senders = Vec::new();
     for hue in hues {
         let (id, device, inbox) = (hue.id, hue.device.clone(), inbox.clone());
@@ -172,6 +205,9 @@ pub fn run(
                     }
                 }
             }
+            Ok(Event::Control(command)) => {
+                handle_control(&mut router, command, &mut listeners, now());
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 return io::Error::other("every reading thread has stopped");
@@ -193,32 +229,10 @@ pub fn run(
             }
         }
         while let Some(delivery) = router.poll_delivery() {
-            match &mut tun {
-                // Only end-to-end data, from the node its source address names.
-                Some((device, prefix, own)) if delivery.sender_keys.is_some() => {
-                    let genuine = addresses(&delivery.payload).is_some_and(|(src, dst)| {
-                        prefix.node(&src) == Some(delivery.src) && &dst == own
-                    });
-                    if !genuine {
-                        debug!(
-                            "dropped a packet from {} with the wrong addresses",
-                            delivery.src
-                        );
-                    } else if let Err(err) = device.write_packet(&delivery.payload) {
-                        warn!("writing to {} failed: {err}", device.name);
-                    }
-                }
-                // TODO: a local interface for programs to send and receive
-                // on channels.
-                _ => match delivery.channel {
-                    Some(channel) => info!(
-                        "channel {channel}: {} bytes from {}",
-                        delivery.payload.len(),
-                        delivery.src
-                    ),
-                    None => info!("{} bytes from {}", delivery.payload.len(), delivery.src),
-                },
-            }
+            let tun = tun
+                .as_mut()
+                .map(|(device, prefix, own)| (&mut *device, *prefix, *own));
+            deliver(delivery, tun, &mut listeners);
         }
 
         if let Some(snapshot) = snapshot.as_ref().filter(|_| now() >= next_snapshot) {
@@ -232,6 +246,100 @@ pub fn run(
             report(&router, &hues);
         }
     }
+}
+
+/// Hands data that reached this node to the TUN device or to programs
+/// listening on the control socket.
+fn deliver(
+    delivery: Delivery,
+    tun: Option<(&mut Tun, Prefix, [u8; 16])>,
+    listeners: &mut Vec<mpsc::Sender<String>>,
+) {
+    let src = delivery.src;
+    let mut notify = |channel, data: &[u8]| {
+        let line = control::message_line(src, channel, data);
+        listeners.retain(|listener| listener.send(line.clone()).is_ok());
+    };
+    if let Some(channel) = delivery.channel {
+        info!(
+            "channel {channel}: {} bytes from {src}",
+            delivery.payload.len()
+        );
+        notify(Some(channel), &delivery.payload);
+        return;
+    }
+    if delivery.sender_keys.is_none() {
+        // A broadcast to neighbors, which the mesh key protects but which
+        // doesn't prove its sender.
+        info!("{} bytes from neighbor {src}", delivery.payload.len());
+        return;
+    }
+    match Payload::classify(&delivery.payload) {
+        Payload::Message(data) => {
+            info!("message of {} bytes from {src}", data.len());
+            notify(None, data);
+        }
+        Payload::Ipv6(packet) => match tun {
+            // Only from the node its source address names.
+            Some((device, prefix, own)) => {
+                let genuine = addresses(packet)
+                    .is_some_and(|(s, d)| prefix.node(&s) == Some(src) && d == own);
+                if !genuine {
+                    debug!("dropped a packet from {src} with the wrong addresses");
+                } else if let Err(err) = device.write_packet(packet) {
+                    warn!("writing to {} failed: {err}", device.name);
+                }
+            }
+            None => debug!("dropped an IPv6 packet from {src}: no TUN device"),
+        },
+        Payload::Unknown => debug!(
+            "dropped {} bytes of an unknown type from {src}",
+            delivery.payload.len()
+        ),
+    }
+}
+
+/// Carries out a command from the control socket and answers it.
+fn handle_control(
+    router: &mut Router,
+    command: Command,
+    listeners: &mut Vec<mpsc::Sender<String>>,
+    now: Instant,
+) {
+    let result = match command.request {
+        Request::Send { node, data } => {
+            if data.len() >= MAX_PAYLOAD {
+                Err(format!("at most {} bytes fit", MAX_PAYLOAD - 1))
+            } else {
+                router
+                    .send(node, &app::message(&data), now)
+                    .map(|()| String::new())
+                    .map_err(|err| err.to_string())
+            }
+        }
+        Request::Channel { channel, data } => control::find_channel(&channel, router.channels())
+            .and_then(|id| {
+                router
+                    .send_to_channel(id, &data, now)
+                    .map_err(|err| err.to_string())
+            })
+            .map(|()| String::new()),
+        Request::Channels => Ok(router
+            .channels()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")),
+        Request::Listen => {
+            listeners.push(command.client.clone());
+            Ok(String::new())
+        }
+    };
+    let reply = match result {
+        Ok(text) if text.is_empty() => "ok".to_string(),
+        Ok(text) => format!("ok {text}"),
+        Err(err) => format!("error {err}"),
+    };
+    let _ = command.client.send(reply);
 }
 
 /// The shortest gap between ICMPv6 errors: at most 10 a second.

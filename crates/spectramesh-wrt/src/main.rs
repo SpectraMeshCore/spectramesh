@@ -2,6 +2,7 @@
 //! systems. See `config.rs` for its options.
 
 mod config;
+mod control;
 mod daemon;
 mod icmp;
 mod keys;
@@ -24,7 +25,7 @@ use spectramesh_core::{
     TRANSPORT_OVERHEAD,
 };
 
-use crate::config::{Command, Config, USAGE};
+use crate::config::{Command, Config, Destination, USAGE};
 use crate::link::{Device, EthernetSocket, LENGTH_PREFIX_LEN};
 use crate::modem::Modem;
 use crate::tun::{IPV6_MIN_MTU, Prefix, Tun};
@@ -48,6 +49,25 @@ fn main() -> ExitCode {
             mesh_key_file,
             ipv6_prefix,
         }) => return node_info(&identity_file, mesh_key_file.as_deref(), ipv6_prefix),
+        Ok(Command::Send {
+            control,
+            to,
+            message,
+        }) => return send(&control::path(control.as_deref()), to, &message),
+        Ok(Command::Channels { control }) => {
+            let ids = control::request(&control::path(control.as_deref()), "channels");
+            return client_result(ids.map(|ids| {
+                for id in ids.split_whitespace() {
+                    println!("{id}");
+                }
+            }));
+        }
+        Ok(Command::Listen { control }) => {
+            return client_result(control::listen(
+                &control::path(control.as_deref()),
+                io::stdout().lock(),
+            ));
+        }
         Err(err) => {
             eprintln!("spectrameshd: {err}\n\n{USAGE}");
             return ExitCode::from(2);
@@ -69,6 +89,26 @@ fn generate(to_text: impl FnOnce([u8; 32]) -> String) -> ExitCode {
         }
         Err(err) => {
             eprintln!("spectrameshd: no random numbers: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Asks the running daemon to send `message`.
+fn send(control: &Path, to: Destination, message: &str) -> ExitCode {
+    let hex = control::hex(message.as_bytes());
+    let command = match to {
+        Destination::Node(node) => format!("send {node} {hex}"),
+        Destination::Channel(channel) => format!("channel {channel} {hex}"),
+    };
+    client_result(control::request(control, &command).map(drop))
+}
+
+fn client_result(result: io::Result<()>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("spectrameshd: {err}");
             ExitCode::FAILURE
         }
     }
@@ -257,5 +297,9 @@ fn run(config: Config) -> io::Error {
         },
     };
 
-    daemon::run(router, hues, tun, snapshot, config.report_interval)
+    let control = daemon::ControlSocket {
+        path: control::path(config.control.as_deref()),
+        configured: config.control.is_some(),
+    };
+    daemon::run(router, hues, tun, snapshot, config.report_interval, control)
 }

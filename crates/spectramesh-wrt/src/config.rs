@@ -22,6 +22,10 @@ Usage: spectrameshd [OPTIONS] --mesh-key-file FILE --hue DEVICE[,SETTING=VALUE..
        spectrameshd --generate-mesh-key
        spectrameshd --generate-channel-key
        spectrameshd --node-info [--identity FILE] [--mesh-key-file FILE]
+       spectrameshd [--control PATH] --send NODE MESSAGE
+       spectrameshd [--control PATH] --send-channel CHANNEL MESSAGE
+       spectrameshd [--control PATH] --listen
+       spectrameshd [--control PATH] --channels
 
 Routes SpectraMesh traffic across the given network devices.
 
@@ -48,10 +52,21 @@ Options:
   --ipv6-prefix PREFIX    The mesh's /64, such as fd12:3456:789a:: (default:
                           derived from the first mesh key)
   --report-interval SECS  How often to log neighbors and routes (default 30)
+  --control PATH          The control socket, through which programs on this
+                          host send and receive messages
+                          (default /var/run/spectramesh.sock)
   -v, --verbose           Log debug messages
   --generate-mesh-key     Print a new random mesh key and exit
   --generate-channel-key  Print a new random channel key and exit
   --node-info             Print this node's ID and IPv6 address and exit
+  --send NODE MESSAGE     Ask the running daemon to send MESSAGE to NODE,
+                          encrypted end to end, and exit
+  --send-channel CHANNEL MESSAGE
+                          Ask the running daemon to send MESSAGE on a joined
+                          channel (CHANNEL may be the start of its ID) and exit
+  --listen                Print messages the running daemon receives
+  --channels              Print the IDs of the channels the running daemon
+                          has joined
   -h, --help              Show this help
 
 Example:
@@ -69,6 +84,27 @@ pub enum Command {
         mesh_key_file: Option<PathBuf>,
         ipv6_prefix: Option<[u8; 8]>,
     },
+    /// Asks the running daemon to send a message.
+    Send {
+        control: Option<PathBuf>,
+        to: Destination,
+        message: String,
+    },
+    /// Prints messages the running daemon receives.
+    Listen {
+        control: Option<PathBuf>,
+    },
+    /// Prints the channels the running daemon has joined.
+    Channels {
+        control: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Destination {
+    Node(spectramesh_core::NodeId),
+    /// The start of a channel's ID.
+    Channel(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,6 +118,8 @@ pub struct Config {
     pub tun: Option<String>,
     pub ipv6_prefix: Option<[u8; 8]>,
     pub report_interval: Duration,
+    /// `None` for the default.
+    pub control: Option<PathBuf>,
     pub verbose: bool,
 }
 
@@ -112,6 +150,10 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     let mut node_info = false;
     let mut tun = None;
     let mut ipv6_prefix = None;
+    let mut control = None;
+    let mut send = None;
+    let mut listen = false;
+    let mut list_channels = false;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -140,6 +182,26 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                     .map_err(|_| format!("invalid report interval {secs:?}"))?;
                 report_interval = Duration::from_secs(secs.max(1));
             }
+            "--control" => control = Some(value("--control")?.into()),
+            "--send" => {
+                let node = value("--send")?;
+                let node = node
+                    .parse()
+                    .map_err(|_| format!("{node:?} isn't a node ID like !0123456789abcdef"))?;
+                send = Some((Destination::Node(node), value("--send")?));
+            }
+            "--send-channel" => {
+                let channel = value("--send-channel")?.to_ascii_lowercase();
+                if channel.is_empty()
+                    || channel.len() > 16
+                    || !channel.bytes().all(|b| b.is_ascii_hexdigit())
+                {
+                    return Err(format!("{channel:?} isn't a channel ID"));
+                }
+                send = Some((Destination::Channel(channel), value("--send-channel")?));
+            }
+            "--listen" => listen = true,
+            "--channels" => list_channels = true,
             "-v" | "--verbose" => verbose = true,
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -157,6 +219,19 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
             ipv6_prefix,
         });
     }
+    if let Some((to, message)) = send {
+        return Ok(Command::Send {
+            control,
+            to,
+            message,
+        });
+    }
+    if listen {
+        return Ok(Command::Listen { control });
+    }
+    if list_channels {
+        return Ok(Command::Channels { control });
+    }
     if hues.is_empty() {
         return Err("at least one --hue is needed".into());
     }
@@ -171,6 +246,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
         tun,
         ipv6_prefix,
         report_interval,
+        control,
         verbose,
     }))
 }
@@ -342,6 +418,41 @@ mod tests {
         );
         let err = parse_str("--hue eth0 --mesh-key-file k --ipv6-prefix fd00::1").unwrap_err();
         assert!(err.contains("must be a /64"), "{err}");
+    }
+
+    #[test]
+    fn parses_client_commands() {
+        let args = |text: &str| -> Vec<String> { text.split(' ').map(String::from).collect() };
+        assert_eq!(
+            parse(args("--control /tmp/c.sock --send !023e13d36796696d hello")),
+            Ok(Command::Send {
+                control: Some("/tmp/c.sock".into()),
+                to: Destination::Node("!023e13d36796696d".parse().unwrap()),
+                message: "hello".into(),
+            })
+        );
+        assert_eq!(
+            parse(args("--send-channel 3FA4 hi")),
+            Ok(Command::Send {
+                control: None,
+                to: Destination::Channel("3fa4".into()),
+                message: "hi".into(),
+            })
+        );
+        assert_eq!(
+            parse(args("--listen")),
+            Ok(Command::Listen { control: None })
+        );
+        assert!(
+            parse(args("--send !12 hi"))
+                .unwrap_err()
+                .contains("isn't a node ID")
+        );
+        assert!(
+            parse(args("--send-channel nope hi"))
+                .unwrap_err()
+                .contains("isn't a channel")
+        );
     }
 
     #[test]

@@ -14,6 +14,10 @@
 # answers with "no route". Node 4 has a different mesh key, so node 2 drops
 # everything it sends.
 #
+# Nodes 1 and 3 also share a channel, which node 2 relays without being able
+# to read. Through its control socket, node 1 sends node 3 a message on the
+# channel and another directly, and node 3 prints what arrives.
+#
 # Needs no root, only unprivileged user namespaces (enabled on most Linux
 # distributions).
 #
@@ -30,27 +34,30 @@ fi
 
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
-(umask 077 && "$bin" --generate-mesh-key >"$dir/mesh.key" && "$bin" --generate-mesh-key >"$dir/other.key")
+(umask 077 && "$bin" --generate-mesh-key >"$dir/mesh.key" && "$bin" --generate-mesh-key >"$dir/other.key" &&
+	"$bin" --generate-channel-key >"$dir/channel.key")
 # Create node 3's identity now, so node 1 knows which address to ping.
 address() {
 	"$bin" --node-info --identity "$dir/$1.id" --mesh-key-file "$dir/mesh.key" |
 		sed -n 's/^IPv6 address: *//p'
 }
 target=$(address "node 3")
+target_id=$("$bin" --node-info --identity "$dir/node 3.id" | sed -n 's/^node ID: *//p')
 # An address in the mesh that no running node has.
 nowhere=$(address nobody)
 
 unshare --user --map-root-user --net sh -eu -c '
-	bin=$1 dir=$2 seconds=$3 target=$4 nowhere=$5
+	bin=$1 dir=$2 seconds=$3 target=$4 nowhere=$5 target_id=$6
 
 	# Starts a node in a network namespace of its own. It waits for its
-	# cables, then runs the daemon, and pings `ping` if that is set.
+	# cables, then runs the daemon. If `ping` is set, it pings that address
+	# and sends `target_id` messages; if it is "listen", it prints messages.
 	node() {
-		name=$1 key=$2 ping=$3
-		shift 3
+		name=$1 key=$2 ping=$3 channels=$4
+		shift 4
 		unshare --net --mount sh -eu -c "
-			name=\$1 bin=\$2 dir=\$3 key=\$4 seconds=\$5 ping=\$6 nowhere=\$7
-			shift 7
+			name=\$1 bin=\$2 dir=\$3 key=\$4 seconds=\$5 ping=\$6 nowhere=\$7 channels=\$8 target_id=\$9
+			shift 9
 			mount -t sysfs sysfs /sys
 			ip link set lo up
 			hues=
@@ -60,10 +67,14 @@ unshare --user --map-root-user --net sh -eu -c '
 				ip link set \$dev up
 				hues=\"\$hues --hue \$hue\"
 			done
+			control=\"\$dir/\$name.sock\"
 			\"\$bin\" --identity \"\$dir/\$name.id\" --mesh-key-file \"\$dir/\$key\" --tun smesh0 \
-				--name \"\$name\" --web 127.0.0.1:8470 \
+				--name \"\$name\" --web 127.0.0.1:8470 --control \"\$control\" \$channels \
 				--report-interval \$((seconds - 1)) \$hues 2>&1 | sed \"s/^/[\$name] /\" &
-			if [ -n \"\$ping\" ]; then
+			if [ \"\$ping\" = listen ]; then
+				while [ ! -S \"\$control\" ]; do sleep 0.1; done
+				\"\$bin\" --control \"\$control\" --listen 2>&1 | sed \"s/^/[\$name listen] /\" &
+			elif [ -n \"\$ping\" ]; then
 				sleep \$((seconds - 9))
 				ping -6 -c 3 -W 2 \$ping 2>&1 | sed \"s/^/[\$name ping] /\" || true
 				ping -6 -c 3 -W 2 -s 1200 \$ping 2>&1 | sed \"s/^/[\$name big ping] /\" || true
@@ -71,19 +82,26 @@ unshare --user --map-root-user --net sh -eu -c '
 				# The map, as the web page sees it.
 				curl -s http://127.0.0.1:8470/api/mesh | sed \"s/^/[\$name map] /\" || true
 				echo
+				channel=\$(\"\$bin\" --control \"\$control\" --channels)
+				\"\$bin\" --control \"\$control\" --send-channel \$channel \"hello channel\" 2>&1 |
+					sed \"s/^/[\$name send] /\" || true
+				\"\$bin\" --control \"\$control\" --send \$target_id \"hello node 3\" 2>&1 |
+					sed \"s/^/[\$name send] /\" || true
 			fi
 			wait
-		" node "$name" "$bin" "$dir" "$key" "$seconds" "$ping" "$nowhere" "$@" &
+		" node "$name" "$bin" "$dir" "$key" "$seconds" "$ping" "$nowhere" "$channels" "$target_id" "$@" &
 		pids="${pids:+$pids,}$!"
 		eval "pid_$(echo "$name" | tr -d " ")=$!"
 	}
 	pids=
 	# If anything below fails, stop the nodes rather than leave them waiting.
 	trap '"'"'[ -z "$pids" ] || kill $(echo "$pids" | tr , " ") 2>/dev/null'"'"' EXIT
-	node "node 1" mesh.key "$target" a0
-	node "node 2" mesh.key "" b0 b1,mtu=250 b2
-	node "node 3" mesh.key "" c1,mtu=250
-	node "node 4" other.key "" d2
+	# Node 2 relays the channel without its key.
+	join="--channel-key-file $dir/channel.key"
+	node "node 1" mesh.key "$target" "$join" a0
+	node "node 2" mesh.key "" "" b0 b1,mtu=250 b2
+	node "node 3" mesh.key listen "$join" c1,mtu=250
+	node "node 4" other.key "" "" d2
 
 	# Wait for each node to be in its own namespace, then plug in the cables.
 	here=$(readlink /proc/self/ns/net)
@@ -103,4 +121,4 @@ unshare --user --map-root-user --net sh -eu -c '
 	pkill -x -P "$pids" spectrameshd || true
 	wait
 	pids=
-' demo "$bin" "$dir" "$seconds" "$target" "$nowhere"
+' demo "$bin" "$dir" "$seconds" "$target" "$nowhere" "$target_id"
