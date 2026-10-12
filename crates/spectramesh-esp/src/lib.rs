@@ -3,7 +3,8 @@
 //! [`mesh`] runs the `spectramesh-core` router as an embassy task. Each hue
 //! (so far, [`espnow`]) runs its own receive and send tasks and talks to the
 //! router through channels, so adding a radio means adding a module like
-//! [`espnow`] and registering it in `main`.
+//! [`espnow`] and registering it in `main`. [`sub_ghz`] is the next: an
+//! SX1262 radio, waiting for a board to wire it to.
 //!
 //! [`storage`] keeps the node's identity, settings and boot count in flash,
 //! and [`console`] lets a host set them over USB. [`reset`] restarts the
@@ -18,3 +19,4 @@ pub mod espnow;
 pub mod mesh;
 pub mod reset;
 pub mod storage;
+pub mod sub_ghz;

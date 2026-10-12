@@ -20,6 +20,7 @@ Routes pick the fastest hue that reaches, and can mix hues hop by hop. Nodes cab
 |---|---|
 | [`spectramesh-core`](crates/spectramesh-core) | Routing engine, shared by every platform (`no_std`, Rust) |
 | [`spectramesh-esp`](crates/spectramesh-esp) | ESP32 firmware, with ESP-NOW (`no_std`, Rust, embassy) |
+| [`spectramesh-sx126x`](crates/spectramesh-sx126x) | Driver for SX1262 sub-GHz radios, in LoRa and GFSK (`no_std`, Rust) |
 | [`spectramesh-wrt`](crates/spectramesh-wrt) | Routing daemon for OpenWRT and other Linux systems, with its OpenWRT package |
 
 ## Status

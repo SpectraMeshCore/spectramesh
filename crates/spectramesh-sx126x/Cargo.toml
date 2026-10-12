@@ -1,0 +1,20 @@
+[package]
+name = "spectramesh-sx126x"
+description = "Async driver for Semtech SX1261/SX1262 radios, in LoRa and GFSK, for SpectraMesh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["sx1262", "lora", "radio", "embedded-hal", "no-std"]
+categories = ["embedded", "hardware-support", "no-std"]
+publish = false
+
+[dependencies]
+embedded-hal = "1.0.0"
+embedded-hal-async = "1.0.0"
+
+[dev-dependencies]
+embassy-futures = "0.1.2"

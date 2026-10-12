@@ -47,15 +47,15 @@ jobs:
         run: cargo test -p spectramesh-wrt --locked -- --ignored
 
   no-std:
-    name: Core without std
+    name: Core and radio driver without std
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup update stable --no-self-update && rustup default stable
       - run: rustup target add thumbv7em-none-eabihf riscv32imac-unknown-none-elf
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo build -p spectramesh-core --locked --target thumbv7em-none-eabihf
-      - run: cargo build -p spectramesh-core --locked --target riscv32imac-unknown-none-elf
+      - run: cargo build -p spectramesh-core -p spectramesh-sx126x --locked --target thumbv7em-none-eabihf
+      - run: cargo build -p spectramesh-core -p spectramesh-sx126x --locked --target riscv32imac-unknown-none-elf
 
   msrv:
     name: Minimum Rust version (1.85)

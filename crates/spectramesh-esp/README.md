@@ -102,6 +102,7 @@ The protocol (SLIP-framed messages over the USB serial link) is in `spectramesh_
 | `src/console.rs` | The serial console |
 | `src/reset.rs` | Restarts, including after a panic, and why the board last started |
 | `src/espnow.rs` | The ESP-NOW hue: a receive task and a send task, which unicasts to neighbors whose MAC address the router task has learned (so ESP-NOW acknowledges and retries) and broadcasts the rest, in frames of up to 1,470 bytes (ESP-NOW v2) |
+| `src/sub_ghz.rs` | An SX1262 radio as a hue, not yet wired to a board |
 | `src/bin/modem.rs` | The USB radio modem firmware |
 
 Each hue talks to the router only through channels. To add a radio, write a module like `espnow.rs` with a receive task that feeds `mesh::INBOX` and a send task that reads its own `Outbox`, then register it in `main.rs`.
@@ -114,7 +115,7 @@ The Xtensa chips (the original ESP32 and the S3) need Espressif's toolchain from
 
 ## Next steps
 
-- **A sub-GHz hue**: an SX1262 driver over SPI for 915 MHz FSK and LoRa (Heltec WiFi LoRa 32 V3, LilyGO T-Beam)
+- **Wiring the sub-GHz hue to a board.** `src/sub_ghz.rs` runs an SX1262 (driver: [`spectramesh-sx126x`](../spectramesh-sx126x)) as a hue, in GFSK or LoRa. It needs a board's pins in `main.rs`. Most ESP32 boards with an SX1262 (Heltec WiFi LoRa 32 V3, LilyGO T-Beam S3) use the ESP32-S3, an Xtensa chip; see "Other chips" below
 - **An application interface**, so code on the board can send and receive mesh data (today, messages go to the console)
 - **Flash encryption on real boards**; see below
 
