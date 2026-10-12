@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/spectramesh-core", "crates/spectramesh-wrt"]
 # Firmware builds for a microcontroller target with its own settings, so it is built
 # from its own directory rather than as part of the workspace.
-exclude = ["crates/spectramesh-esp"]
+exclude = ["crates/spectramesh-esp", "fuzz"]
 
 [workspace.package]
 version = "0.1.0"

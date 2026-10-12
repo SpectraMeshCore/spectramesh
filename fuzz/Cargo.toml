@@ -1,0 +1,51 @@
+[package]
+name = "spectramesh-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+spectramesh-core = { path = "../crates/spectramesh-core" }
+
+# Kept out of the main workspace: fuzzing needs nightly Rust and its own build flags.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "frame"
+path = "fuzz_targets/frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "router"
+path = "fuzz_targets/router.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "modem"
+path = "fuzz_targets/modem.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "key_text"
+path = "fuzz_targets/key_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reassembly"
+path = "fuzz_targets/reassembly.rs"
+test = false
+doc = false
+bench = false
