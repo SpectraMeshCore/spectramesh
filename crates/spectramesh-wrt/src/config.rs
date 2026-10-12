@@ -5,12 +5,13 @@
 //!
 //! | Setting   | Values                                                   | Default |
 //! |-----------|----------------------------------------------------------|---------|
-//! | `kind`    | `ethernet` (including fiber), `wifi` or `halow`          | `ethernet` |
-//! | `bitrate` | Bits per second, optionally with a `k`, `M` or `G` suffix | `1G` for Ethernet; required for radios |
+//! | `kind`    | `ethernet` (including fiber), `wifi`, `halow`, or `modem` for a radio modem on a serial port | `ethernet` |
+//! | `bitrate` | Bits per second, optionally with a `k`, `M` or `G` suffix | `1G` for Ethernet, the modem's own for modems; required for radios |
 //! | `freq`    | Channel frequency in MHz                                 | 2437 for `wifi`, 915 for `halow` |
 //! | `mtu`     | Largest SpectraMesh frame, in bytes                      | The device's MTU, less 2 |
 //!
-//! For example, `--hue eth1` or `--hue phy1-mesh0,kind=wifi,freq=5805,bitrate=100M`.
+//! For example, `--hue eth1`, `--hue phy1-mesh0,kind=wifi,freq=5805,bitrate=100M` or
+//! `--hue /dev/ttyACM0,kind=modem`.
 
 use spectramesh_core::HueKind;
 use std::path::PathBuf;
@@ -26,8 +27,11 @@ Routes SpectraMesh traffic across the given network devices.
 
 Options:
   --hue SPEC              A network device to route over (repeatable). Settings:
-                            kind=ethernet|wifi|halow   (default ethernet)
-                            bitrate=BITS[k|M|G]        (default 1G for ethernet)
+                            kind=ethernet|wifi|halow|modem (default ethernet;
+                                    modem: DEVICE is a serial port with a
+                                    spectramesh-modem radio on it)
+                            bitrate=BITS[k|M|G]        (default 1G for ethernet,
+                                                        the modem's own for modems)
                             freq=MHZ                   (radio channel frequency)
                             mtu=BYTES                  (default: device MTU less 2)
   --mesh-key-file FILE    The mesh keys, one per line. The first is sent with;
@@ -79,7 +83,10 @@ pub struct Config {
 pub struct HueSpec {
     pub device: String,
     pub kind: HueKind,
-    pub bitrate_bps: u64,
+    /// Whether `device` is a serial port with a radio modem on it.
+    pub modem: bool,
+    /// `None` for a modem, to use its own.
+    pub bitrate_bps: Option<u64>,
     /// `None` to use the device's MTU.
     pub mtu: Option<u16>,
 }
@@ -195,16 +202,21 @@ fn parse_hue(spec: &str) -> Result<HueSpec, String> {
         "halow" => HueKind::Wifi {
             freq_mhz: freq.unwrap_or(915),
         },
+        // The only modem firmware so far speaks ESP-NOW.
+        "modem" => HueKind::EspNow,
         other => return Err(format!("unknown kind {other:?} in hue {spec:?}")),
     };
+    let modem = kind == HueKind::EspNow;
     let bitrate_bps = match (bitrate, kind) {
-        (Some(bitrate), _) => bitrate,
-        (None, HueKind::Ethernet) => 1_000_000_000,
+        (Some(bitrate), _) => Some(bitrate),
+        (None, HueKind::Ethernet) => Some(1_000_000_000),
+        (None, HueKind::EspNow) => None,
         (None, _) => return Err(format!("hue {spec:?} needs a bitrate")),
     };
     Ok(HueSpec {
         device: device.into(),
         kind,
+        modem,
         bitrate_bps,
         mtu,
     })
@@ -260,19 +272,22 @@ mod tests {
                 HueSpec {
                     device: "eth1".into(),
                     kind: HueKind::Ethernet,
-                    bitrate_bps: 1_000_000_000,
+                    modem: false,
+                    bitrate_bps: Some(1_000_000_000),
                     mtu: None,
                 },
                 HueSpec {
                     device: "phy1-mesh0".into(),
                     kind: HueKind::Wifi { freq_mhz: 5805 },
-                    bitrate_bps: 100_000_000,
+                    modem: false,
+                    bitrate_bps: Some(100_000_000),
                     mtu: None,
                 },
                 HueSpec {
                     device: "wlan2".into(),
                     kind: HueKind::Wifi { freq_mhz: 915 },
-                    bitrate_bps: 2_000_000,
+                    modem: false,
+                    bitrate_bps: Some(2_000_000),
                     mtu: Some(1000),
                 },
             ]
@@ -285,6 +300,16 @@ mod tests {
             parse(["--generate-mesh-key".to_string()]),
             Ok(Command::GenerateMeshKey)
         );
+    }
+
+    #[test]
+    fn modems_take_a_serial_port() {
+        let config = parse_str("--hue /dev/ttyACM0,kind=modem --mesh-key-file k").unwrap();
+        let hue = &config.hues[0];
+        assert_eq!(hue.device, "/dev/ttyACM0");
+        assert!(hue.modem);
+        assert_eq!(hue.kind, HueKind::EspNow);
+        assert_eq!(hue.bitrate_bps, None);
     }
 
     #[test]
@@ -305,7 +330,7 @@ mod tests {
     #[test]
     fn handles_fast_fiber() {
         let config = parse_str("--hue sfp0,bitrate=10G --mesh-key-file k").unwrap();
-        assert_eq!(config.hues[0].bitrate_bps, 10_000_000_000);
+        assert_eq!(config.hues[0].bitrate_bps, Some(10_000_000_000));
     }
 
     #[test]

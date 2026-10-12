@@ -15,6 +15,10 @@ SpectraMesh frames travel directly inside Ethernet frames (EtherType `0x88B5`), 
 
 Wired links use the reliable link model and radio links the lossy one (see the core README), so cabled routers prefer the cable and fall back to radio when it's cut.
 
+**ESP-NOW, through a USB radio modem.** An ESP32 running `spectramesh-modem` (see `spectramesh-esp`) gives any Linux machine an ESP-NOW hue, so a laptop can join a mesh of ESP32 nodes: `--hue /dev/serial/by-id/...,kind=modem`. The modem reports its own MTU and bitrate. Serial ports need membership of the `dialout` group, not root.
+
+**A laptop's own Wi-Fi.** A laptop connected to a router's ordinary Wi-Fi network can reach a router running `spectrameshd` on that network's bridge with an Ethernet-style hue on its Wi-Fi interface (`--hue wlp164s0,kind=wifi,bitrate=100M`): SpectraMesh frames travel inside the Wi-Fi network like Ethernet frames. Joining an 802.11s mesh directly needs a card whose driver supports mesh mode; Intel cards' generally doesn't.
+
 Each frame starts with a 2-byte length, because Ethernet pads short frames. Frames for a known neighbor are sent to its MAC address, which on Wi-Fi gets link-layer acknowledgements and retries. Everything else is broadcast.
 
 ## Running on any Linux machine

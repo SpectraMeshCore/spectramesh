@@ -11,8 +11,8 @@ use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
-use log::{info, warn};
-use spectramesh_core::{HueId, Instant, Router, Transmit};
+use log::{debug, info, warn};
+use spectramesh_core::{Error, HueId, Instant, Router, Transmit};
 
 /// A frame a hue received.
 pub struct Received {
@@ -45,7 +45,14 @@ pub async fn run(mut router: Box<Router>, outboxes: &'static [(HueId, &'static O
         if let Either::First(received) = select(INBOX.receive(), Timer::at(wakeup)).await
             && let Err(err) = router.handle_frame(received.hue, &received.frame, now())
         {
-            warn!("dropped a frame on hue {}: {err}", received.hue.0);
+            match err {
+                // Outsiders and damaged frames are worth knowing about; the
+                // rest, such as challenges to new neighbors, are routine.
+                Error::BadTag | Error::Replay => {
+                    warn!("dropped a frame on hue {}: {err}", received.hue.0)
+                }
+                _ => debug!("dropped a frame on hue {}: {err}", received.hue.0),
+            }
         }
 
         router.poll(now());

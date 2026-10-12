@@ -18,13 +18,44 @@ use spectramesh_core::{Error, HueId, Instant, NodeId, Router};
 
 use crate::icmp;
 use crate::link::{BROADCAST_MAC, EthernetSocket, Mac};
+use crate::modem::{Modem, ModemReader};
 use crate::tun::{Prefix, Tun, addresses};
 
-/// A hue ready to run: its router ID, its socket and its device's name.
+/// A hue ready to run: its router ID, its device's name, and how to send
+/// and receive on it.
 pub struct Hue {
     pub id: HueId,
     pub device: String,
-    pub socket: Arc<EthernetSocket>,
+    pub link: Link,
+    pub reader: Reader,
+}
+
+/// The sending side of a hue.
+pub enum Link {
+    Ethernet(Arc<EthernetSocket>),
+    Modem(Arc<Modem>),
+}
+
+impl Link {
+    fn send(&self, dst: Mac, frame: &[u8]) -> io::Result<()> {
+        match self {
+            Link::Ethernet(socket) => socket.send(dst, frame),
+            Link::Modem(modem) => modem.send(dst, frame),
+        }
+    }
+}
+
+/// The receiving side of a hue, which runs on its own thread.
+pub enum Reader {
+    Ethernet(Arc<EthernetSocket>),
+    Modem(ModemReader),
+}
+
+/// A hue's sending side, kept by the router thread.
+struct Sender {
+    id: HueId,
+    device: String,
+    link: Link,
 }
 
 enum Event {
@@ -46,15 +77,24 @@ pub fn run(
     report_interval: Duration,
 ) -> io::Error {
     let (inbox, events) = mpsc::channel();
-    for hue in &hues {
-        let (id, device, socket, inbox) = (
-            hue.id,
-            hue.device.clone(),
-            hue.socket.clone(),
-            inbox.clone(),
-        );
-        thread::spawn(move || receive(id, &device, &socket, &inbox));
+    let mut senders = Vec::new();
+    for hue in hues {
+        let (id, device, inbox) = (hue.id, hue.device.clone(), inbox.clone());
+        match hue.reader {
+            Reader::Ethernet(socket) => {
+                thread::spawn(move || receive(id, &device, &socket, &inbox));
+            }
+            Reader::Modem(reader) => {
+                thread::spawn(move || receive_modem(id, &device, reader, &inbox));
+            }
+        }
+        senders.push(Sender {
+            id: hue.id,
+            device: hue.device,
+            link: hue.link,
+        });
     }
+    let hues = senders;
     let mut tun = match tun {
         Some((tun, prefix)) => {
             let reader = match tun.try_clone() {
@@ -127,7 +167,7 @@ pub fn run(
                 .get(&(tx.hue, tx.next_hop))
                 .copied()
                 .unwrap_or(BROADCAST_MAC);
-            if let Err(err) = hue.socket.send(dst, &tx.frame) {
+            if let Err(err) = hue.link.send(dst, &tx.frame) {
                 warn!("sending on {} failed: {err}", hue.device);
             }
         }
@@ -214,6 +254,29 @@ fn read_tun(mut tun: Tun, inbox: &mpsc::Sender<Event>) {
     }
 }
 
+fn receive_modem(hue: HueId, device: &str, mut reader: ModemReader, inbox: &mpsc::Sender<Event>) {
+    loop {
+        match reader.recv() {
+            Ok((src_mac, frame)) => {
+                if inbox
+                    .send(Event::Frame {
+                        hue,
+                        src_mac,
+                        frame,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(err) => {
+                error!("reading modem {device} failed: {err}");
+                return;
+            }
+        }
+    }
+}
+
 fn receive(hue: HueId, device: &str, socket: &EthernetSocket, inbox: &mpsc::Sender<Event>) {
     let mut buf = vec![0; 65_536];
     loop {
@@ -241,7 +304,7 @@ fn receive(hue: HueId, device: &str, socket: &EthernetSocket, inbox: &mpsc::Send
     }
 }
 
-fn report(router: &Router, hues: &[Hue]) {
+fn report(router: &Router, hues: &[Sender]) {
     info!(
         "node {}: {} neighbor links, {} routes",
         router.id(),

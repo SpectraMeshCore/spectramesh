@@ -46,6 +46,18 @@ INFO -   !0e0f101112131415 via !0e0f101112131415 on hue 0, cost 800 us
 INFO -   !161718191a1b1c1d via !0e0f101112131415 on hue 0, cost 1600 us
 ```
 
+## As a USB radio modem
+
+The crate's second firmware, `spectramesh-modem`, turns a board into a radio for a computer. It runs no router: it passes every ESP-NOW frame it hears to the computer over USB, and sends whatever the computer asks it to. The computer runs `spectrameshd` with a `kind=modem` hue and is the mesh node, with its own identity and keys, so the modem needs no mesh key:
+
+```
+cargo run --release --bin spectramesh-modem --features xiao-esp32c6
+spectrameshd --mesh-key-file ~/.config/spectramesh/mesh.key \
+    --hue /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_<MAC>-if00,kind=modem
+```
+
+The protocol (SLIP-framed messages over the USB serial link) is in `spectramesh_core::modem`.
+
 ## How it's organized
 
 | File | Role |
@@ -54,6 +66,7 @@ INFO -   !161718191a1b1c1d via !0e0f101112131415 on hue 0, cost 1600 us
 | `src/mesh.rs` | The router task. It owns the `Router`, wakes on received frames and timers, and hands frames to each hue's send queue |
 | `src/identity_store.rs` | Keeps the node's secret in the first sector of the `nvs` flash partition, which this firmware doesn't otherwise use |
 | `src/espnow.rs` | The ESP-NOW hue: a receive task and a send task |
+| `src/bin/modem.rs` | The USB radio modem firmware |
 
 Each hue talks to the router only through channels. To add a radio, write a module like `espnow.rs` with a receive task that feeds `mesh::INBOX` and a send task that reads its own `Outbox`, then register it in `main.rs`.
 

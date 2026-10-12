@@ -7,6 +7,7 @@ mod icmp;
 mod keys;
 mod link;
 mod logger;
+mod modem;
 mod tun;
 
 use std::io;
@@ -24,6 +25,7 @@ use spectramesh_core::{
 
 use crate::config::{Command, Config, USAGE};
 use crate::link::{Device, EthernetSocket, LENGTH_PREFIX_LEN};
+use crate::modem::Modem;
 use crate::tun::{IPV6_MIN_MTU, Prefix, Tun};
 
 fn main() -> ExitCode {
@@ -138,6 +140,32 @@ fn run(config: Config) -> io::Error {
     let mut hues = Vec::new();
     let mut infos = Vec::new();
     for (index, spec) in config.hues.iter().enumerate() {
+        let id = HueId(index as u8);
+        if spec.modem {
+            let (modem, reader) = match Modem::open(&spec.device) {
+                Ok(modem) => modem,
+                Err(err) => return io::Error::new(err.kind(), format!("{}: {err}", spec.device)),
+            };
+            let info = modem.info;
+            info!(
+                "modem {} on channel {}, {} bytes per frame",
+                spec.device, info.channel, info.mtu
+            );
+            let bitrate = spec.bitrate_bps.unwrap_or(info.bitrate_bps.into());
+            infos.push(HueInfo::new(
+                id,
+                spec.kind,
+                spec.mtu.unwrap_or(info.mtu),
+                bitrate,
+            ));
+            hues.push(daemon::Hue {
+                id,
+                device: spec.device.clone(),
+                link: daemon::Link::Modem(Arc::new(modem)),
+                reader: daemon::Reader::Modem(reader),
+            });
+            continue;
+        }
         let device = match Device::open(&spec.device) {
             Ok(device) => device,
             Err(err) => return err,
@@ -152,15 +180,17 @@ fn run(config: Config) -> io::Error {
             }
             Err(err) => return io::Error::new(err.kind(), format!("{}: {err}", device.name)),
         };
-        let id = HueId(index as u8);
         let mtu = spec.mtu.unwrap_or_else(|| {
             u16::try_from(device.mtu.saturating_sub(LENGTH_PREFIX_LEN)).unwrap_or(u16::MAX)
         });
-        infos.push(HueInfo::new(id, spec.kind, mtu, spec.bitrate_bps));
+        let bitrate = spec.bitrate_bps.expect("every non-modem hue has a bitrate");
+        infos.push(HueInfo::new(id, spec.kind, mtu, bitrate));
+        let socket = Arc::new(socket);
         hues.push(daemon::Hue {
             id,
             device: device.name,
-            socket: Arc::new(socket),
+            link: daemon::Link::Ethernet(socket.clone()),
+            reader: daemon::Reader::Ethernet(socket),
         });
     }
 

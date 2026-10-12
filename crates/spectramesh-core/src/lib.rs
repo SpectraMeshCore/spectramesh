@@ -40,6 +40,7 @@ pub mod error;
 pub mod fragment;
 pub mod hue;
 pub mod identity;
+pub mod modem;
 pub mod neighbor;
 pub mod node;
 pub mod packet;
