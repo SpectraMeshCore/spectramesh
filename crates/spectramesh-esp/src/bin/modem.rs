@@ -40,6 +40,9 @@ use spectramesh_core::modem::{
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+/// Transmit power in quarter dBm: 80 is 20 dBm.
+const TX_POWER_QUARTER_DBM: i8 = 80;
+
 /// The Wi-Fi channel ESP-NOW uses; it must match the mesh's ESP32 nodes.
 const ESPNOW_CHANNEL: u8 = 1;
 /// ESP-NOW's default PHY rate.
@@ -95,8 +98,13 @@ async fn main(spawner: Spawner) -> ! {
         Output::new(peripherals.GPIO14, Level::Low, OutputConfig::default()),
     );
 
-    let wifi =
+    let mut wifi =
         WifiController::new(peripherals.WIFI, Default::default()).expect("failed to start Wi-Fi");
+    // esp-radio starts the radio at 5 dBm. Mesh links need range, so use
+    // 20 dBm (units are quarter dBm), the most 2.4 GHz rules allow without
+    // a high-gain antenna.
+    wifi.set_max_tx_power(TX_POWER_QUARTER_DBM)
+        .expect("failed to set transmit power");
     let station = Interface::station();
     let esp_now = wifi.esp_now();
     esp_now

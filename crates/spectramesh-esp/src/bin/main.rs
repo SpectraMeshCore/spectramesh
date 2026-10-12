@@ -43,6 +43,9 @@ const MESH_KEY: Option<&str> = option_env!("SPECTRAMESH_MESH_KEY");
 /// `SPECTRAMESH_NAME=roof cargo run --release`. Optional.
 const NAME: Option<&str> = option_env!("SPECTRAMESH_NAME");
 
+/// Transmit power in quarter dBm: 80 is 20 dBm.
+const TX_POWER_QUARTER_DBM: i8 = 80;
+
 /// The Wi-Fi channel every node's ESP-NOW hue uses.
 const ESPNOW_CHANNEL: u8 = 1;
 
@@ -104,8 +107,13 @@ async fn main(spawner: Spawner) -> ! {
         }
     };
 
-    let wifi =
+    let mut wifi =
         WifiController::new(peripherals.WIFI, Default::default()).expect("failed to start Wi-Fi");
+    // esp-radio starts the radio at 5 dBm. Mesh links need range, so use
+    // 20 dBm (units are quarter dBm), the most 2.4 GHz rules allow without
+    // a high-gain antenna.
+    wifi.set_max_tx_power(TX_POWER_QUARTER_DBM)
+        .expect("failed to set transmit power");
     // With Wi-Fi running, the hardware RNG is a true random source.
     let rng = Rng::new();
     // Timed, as a measure of the elliptic-curve work on this chip: deriving
