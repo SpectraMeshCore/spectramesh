@@ -14,10 +14,11 @@ use spectramesh_core::{
     TRANSPORT_OVERHEAD,
 };
 
-use spectramesh_wrt::config::{self, Command, Config, Destination, USAGE};
+use spectramesh_wrt::config::{self, Command, Config, Destination, LinkType, USAGE};
 use spectramesh_wrt::link::{Device, EthernetSocket, LENGTH_PREFIX_LEN};
 use spectramesh_wrt::modem::Modem;
 use spectramesh_wrt::tun::{IPV6_MIN_MTU, Prefix, Tun};
+use spectramesh_wrt::udp::UdpLink;
 use spectramesh_wrt::{control, daemon, keys, logger, provision, web};
 
 fn main() -> ExitCode {
@@ -185,7 +186,29 @@ fn run(config: Config) -> io::Error {
     let mut infos = Vec::new();
     for (index, spec) in config.hues.iter().enumerate() {
         let id = HueId(index as u8);
-        if spec.modem {
+        if let LinkType::Udp { peers } = &spec.link {
+            let address = spec.device.parse().expect("checked when parsing options");
+            let (link, reader) = match UdpLink::open(address, peers.clone()) {
+                Ok(link) => link,
+                Err(err) => {
+                    return io::Error::new(err.kind(), format!("UDP {}: {err}", spec.device));
+                }
+            };
+            infos.push(HueInfo::new(
+                id,
+                spec.kind,
+                spec.mtu.expect("UDP hues have a default MTU"),
+                spec.bitrate_bps.expect("UDP hues have a default bitrate"),
+            ));
+            hues.push(daemon::Hue {
+                id,
+                device: spec.device.clone(),
+                link: daemon::Link::Udp(Arc::new(link)),
+                reader: daemon::Reader::Udp(reader),
+            });
+            continue;
+        }
+        if spec.link == LinkType::Modem {
             let (modem, reader) = match Modem::open(&spec.device) {
                 Ok(modem) => modem,
                 Err(err) => return io::Error::new(err.kind(), format!("{}: {err}", spec.device)),

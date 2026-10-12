@@ -19,7 +19,9 @@ Wired links use the reliable link model and radio links the lossy one (see the c
 
 **A laptop's own Wi-Fi.** A laptop connected to a router's ordinary Wi-Fi network can reach a router running `spectrameshd` on that network's bridge with an Ethernet-style hue on its Wi-Fi interface (`--hue wlp164s0,kind=wifi,bitrate=100M`): SpectraMesh frames travel inside the Wi-Fi network like Ethernet frames. Joining an 802.11s mesh directly needs a card whose driver supports mesh mode; Intel cards' generally doesn't.
 
-Each frame starts with a 2-byte length, because Ethernet pads short frames. Frames for a known neighbor are sent to its MAC address, which on Wi-Fi gets link-layer acknowledgements and retries. Everything else is broadcast.
+**UDP, across networks SpectraMesh doesn't control.** To link sites over the internet or a VPN, a UDP hue sends frames in UDP datagrams: `--hue [::]:4790,kind=udp,peer=hub.example.org:4790`. It has no broadcast, so broadcast frames go to each `peer` (repeatable) and to every neighbor learned on the hue. A node on a public address can list no peers and learn them from the frames they send, which also suits nodes behind NAT: their hellos, every 4 seconds, keep the NAT's mapping open. The mesh key protects UDP frames as it does every frame, so the port can face the internet. Peer names are looked up again every five minutes. The default MTU is 1,200 bytes, to cross any path without IP fragmentation; larger packets are fragmented by SpectraMesh. UDP links count as reliable and 10 Mbit/s unless told otherwise (`bitrate=`), so routes prefer local links where both exist.
+
+Each Ethernet frame starts with a 2-byte length, because Ethernet pads short frames. Frames for a known neighbor are sent to its MAC address, which on Wi-Fi gets link-layer acknowledgements and retries. Everything else is broadcast.
 
 ## Running on any Linux machine
 
@@ -110,6 +112,8 @@ Node IDs are random, because each run creates new keys.
 
 The same scenario runs as a test: `cargo test -p spectramesh-wrt -- --ignored`.
 
+`tests/udp.rs` runs three daemons linked by UDP on this host, with no privileges: two spokes that only know a hub's address, and the hub, which learns them. The spokes route to each other through the hub and exchange a message.
+
 ## OpenWRT
 
 > The package hasn't been built in the OpenWRT SDK or run on a router yet. Expect fixes.
@@ -190,6 +194,7 @@ Encrypted mesh needs a full `wpad` package (such as `wpad-mbedtls`) instead of t
 | `src/lib.rs` | The modules below, as a library, so they can be tested and fuzzed on their own |
 | `src/config.rs` | Command-line options |
 | `src/keys.rs` | The node's identity file, mesh key files, and random numbers from the kernel |
+| `src/udp.rs` | UDP hues |
 | `src/link.rs` | Raw Ethernet sockets. With `tun.rs`'s device setup and `keys.rs`'s call for random numbers, the only `unsafe` code in the project |
 | `src/tun.rs` | The TUN device for IPv6, and mesh addresses |
 | `src/provision.rs` | `--provision`: gives an ESP32 node its keys and name over USB |
@@ -203,6 +208,5 @@ It uses plain threads, with no async runtime, to keep the binary small for route
 ## Next steps
 
 - **Routing a whole LAN's traffic**, so devices behind a router reach the mesh without running SpectraMesh themselves
-- **A UDP hue**, for linking sites over the internet or networks SpectraMesh doesn't control
 - **Status over ubus**, and a LuCI page
 - **Registering an EtherType** before a public release (`0x88B5` is reserved for experiments)

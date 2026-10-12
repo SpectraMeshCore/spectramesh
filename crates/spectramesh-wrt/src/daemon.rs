@@ -17,13 +17,15 @@ use std::time::Duration;
 
 use log::{debug, error, info, warn};
 use spectramesh_core::app::{self, Payload};
+use spectramesh_core::packet::Frame;
 use spectramesh_core::{Delivery, Error, HueId, Instant, MAX_PAYLOAD, NodeId, Router};
 
 use crate::control::{self, Command, Request};
 use crate::icmp;
-use crate::link::{BROADCAST_MAC, EthernetSocket, Mac};
+use crate::link::{BROADCAST_MAC, EthernetSocket, LinkAddr};
 use crate::modem::{Modem, ModemReader};
 use crate::tun::{Prefix, Tun, addresses};
+use crate::udp::{UdpLink, UdpReader};
 use crate::web::{self, Snapshot};
 
 /// A hue ready to run: its router ID, its device's name, and how to send
@@ -39,13 +41,46 @@ pub struct Hue {
 pub enum Link {
     Ethernet(Arc<EthernetSocket>),
     Modem(Arc<Modem>),
+    Udp(Arc<UdpLink>),
 }
 
 impl Link {
-    fn send(&self, dst: Mac, frame: &[u8]) -> io::Result<()> {
+    /// Sends a frame to `dst`, or broadcasts it. A UDP hue's broadcast goes
+    /// to its configured peers and to `learned`, its neighbors' addresses.
+    fn send(
+        &self,
+        dst: Option<LinkAddr>,
+        learned: impl Iterator<Item = LinkAddr>,
+        frame: &[u8],
+    ) -> io::Result<()> {
+        let mac = match dst {
+            Some(LinkAddr::Mac(mac)) => mac,
+            _ => BROADCAST_MAC,
+        };
         match self {
-            Link::Ethernet(socket) => socket.send(dst, frame),
-            Link::Modem(modem) => modem.send(dst, frame),
+            Link::Ethernet(socket) => socket.send(mac, frame),
+            Link::Modem(modem) => modem.send(mac, frame),
+            Link::Udp(udp) => match dst {
+                Some(LinkAddr::Udp(address)) => udp.send_to(address, frame),
+                _ => {
+                    let mut targets = udp.peers();
+                    targets.extend(learned.filter_map(|address| match address {
+                        LinkAddr::Udp(address) => Some(address),
+                        LinkAddr::Mac(_) => None,
+                    }));
+                    targets.sort();
+                    targets.dedup();
+                    // Send to every peer, even if one fails (an unreachable
+                    // network, say), and report the last failure.
+                    let mut result = Ok(());
+                    for address in targets {
+                        if let Err(err) = udp.send_to(address, frame) {
+                            result = Err(io::Error::new(err.kind(), format!("{address}: {err}")));
+                        }
+                    }
+                    result
+                }
+            },
         }
     }
 }
@@ -54,6 +89,7 @@ impl Link {
 pub enum Reader {
     Ethernet(Arc<EthernetSocket>),
     Modem(ModemReader),
+    Udp(UdpReader),
 }
 
 /// A hue's sending side, kept by the router thread.
@@ -67,7 +103,7 @@ enum Event {
     /// A frame received on a hue.
     Frame {
         hue: HueId,
-        src_mac: Mac,
+        src: LinkAddr,
         frame: Vec<u8>,
         /// Signal strength in dBm, if the hue measures it.
         rssi: Option<i8>,
@@ -124,6 +160,9 @@ pub fn run(
             Reader::Modem(reader) => {
                 thread::spawn(move || receive_modem(id, &device, reader, &inbox));
             }
+            Reader::Udp(reader) => {
+                thread::spawn(move || receive_udp(id, &device, &reader, &inbox));
+            }
         }
         senders.push(Sender {
             id: hue.id,
@@ -140,6 +179,7 @@ pub fn run(
             let name = match h.link {
                 Link::Modem(_) => "ESP-NOW via modem".to_string(),
                 Link::Ethernet(_) => h.device.clone(),
+                Link::Udp(_) => format!("UDP {}", h.device),
             };
             (h.id.0, name)
         })
@@ -162,8 +202,14 @@ pub fn run(
     let start = std::time::Instant::now();
     let now = || Instant::from_millis(start.elapsed().as_millis() as u64);
     // Link-layer address of each neighbor, learned from frames the router
-    // has authenticated, so frames for one neighbor can be unicast.
-    let mut macs: BTreeMap<(HueId, NodeId), Mac> = BTreeMap::new();
+    // has accepted, so frames for one neighbor can be unicast. On UDP hues,
+    // these are also where broadcasts go.
+    let mut neighbor_addresses: BTreeMap<(HueId, NodeId), LinkAddr> = BTreeMap::new();
+    // Addresses of nodes whose frames carried a valid tag but which haven't
+    // passed the router's challenge yet, and when each was heard: where the
+    // challenge goes. (Broadcasts don't: the frame could be a recording sent
+    // from someone else's address.)
+    let mut unverified: BTreeMap<(HueId, NodeId), (LinkAddr, Instant)> = BTreeMap::new();
     let mut next_report = now() + report_interval;
     let mut last_icmp_error = Instant::default();
 
@@ -173,17 +219,23 @@ pub fn run(
         match events.recv_timeout(timeout) {
             Ok(Event::Frame {
                 hue,
-                src_mac,
+                src,
                 frame,
                 rssi,
             }) => match router.handle_frame(hue, &frame, now()) {
                 Ok(Some(sender)) => {
-                    macs.insert((hue, sender), src_mac);
+                    neighbor_addresses.insert((hue, sender), src);
+                    unverified.remove(&(hue, sender));
                     if let Some(rssi) = rssi {
                         router.record_signal(sender, hue, rssi);
                     }
                 }
                 Ok(None) => {}
+                Err(Error::Unverified) => {
+                    if let Ok(frame) = Frame::decode(&frame) {
+                        unverified.insert((hue, frame.header.sender), (src, now()));
+                    }
+                }
                 // Outsiders and damaged frames are worth knowing about.
                 Err(err @ (Error::BadTag | Error::Replay)) => {
                     warn!("dropped a frame on hue {}: {err}", hue.0);
@@ -218,11 +270,16 @@ pub fn run(
                 warn!("no socket for hue {}", tx.hue.0);
                 continue;
             };
-            let dst = macs
-                .get(&(tx.hue, tx.next_hop))
-                .copied()
-                .unwrap_or(BROADCAST_MAC);
-            if let Err(err) = hue.link.send(dst, &tx.frame) {
+            let key = (tx.hue, tx.next_hop);
+            let dst = neighbor_addresses
+                .get(&key)
+                .or_else(|| unverified.get(&key).map(|(address, _)| address))
+                .copied();
+            let learned = neighbor_addresses
+                .iter()
+                .filter(|((hue, _), _)| *hue == tx.hue)
+                .map(|(_, address)| *address);
+            if let Err(err) = hue.link.send(dst, learned, &tx.frame) {
                 warn!("sending on {} failed: {err}", hue.device);
             }
         }
@@ -242,8 +299,14 @@ pub fn run(
         if now() >= next_report {
             next_report = now() + report_interval;
             report(&router, &hues);
-            // Forget the addresses of neighbors the router has dropped.
-            macs.retain(|&(hue, node), _| router.neighbors().get(node, hue).is_some());
+            // Forget the addresses of neighbors the router has dropped, and
+            // of unverified nodes that went quiet.
+            neighbor_addresses
+                .retain(|&(hue, node), _| router.neighbors().get(node, hue).is_some());
+            let quiet = now()
+                .as_millis()
+                .saturating_sub(UNVERIFIED_FOR.as_millis() as u64);
+            unverified.retain(|_, (_, heard)| heard.as_millis() >= quiet);
         }
     }
 }
@@ -342,6 +405,9 @@ fn handle_control(
     let _ = command.client.send(reply);
 }
 
+/// How long to remember an unverified node's address.
+const UNVERIFIED_FOR: Duration = Duration::from_secs(60);
+
 /// The shortest gap between ICMPv6 errors: at most 10 a second.
 const ICMP_ERROR_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -396,7 +462,7 @@ fn receive_modem(hue: HueId, device: &str, mut reader: ModemReader, inbox: &mpsc
                 if inbox
                     .send(Event::Frame {
                         hue,
-                        src_mac,
+                        src: LinkAddr::Mac(src_mac),
                         frame,
                         rssi: Some(rssi),
                     })
@@ -423,7 +489,7 @@ fn receive(hue: HueId, device: &str, socket: &EthernetSocket, inbox: &mpsc::Send
                 if inbox
                     .send(Event::Frame {
                         hue,
-                        src_mac,
+                        src: LinkAddr::Mac(src_mac),
                         frame,
                         rssi: None,
                     })
@@ -434,6 +500,36 @@ fn receive(hue: HueId, device: &str, socket: &EthernetSocket, inbox: &mpsc::Send
             }
             Ok(None) => {}
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                error!("receiving on {device} failed: {err}");
+                return;
+            }
+        }
+    }
+}
+
+fn receive_udp(hue: HueId, device: &str, reader: &UdpReader, inbox: &mpsc::Sender<Event>) {
+    let mut buf = vec![0; 65_536];
+    loop {
+        match reader.recv(&mut buf) {
+            Ok((from, frame)) => {
+                let event = Event::Frame {
+                    hue,
+                    src: LinkAddr::Udp(from),
+                    frame: frame.to_vec(),
+                    rssi: None,
+                };
+                if inbox.send(event).is_err() {
+                    return;
+                }
+            }
+            // ICMP errors from earlier sends (a peer that's down) surface
+            // here on some systems; they don't stop the hue.
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::Interrupted | io::ErrorKind::ConnectionRefused
+                ) => {}
             Err(err) => {
                 error!("receiving on {device} failed: {err}");
                 return;

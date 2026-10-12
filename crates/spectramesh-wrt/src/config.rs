@@ -5,13 +5,16 @@
 //!
 //! | Setting   | Values                                                   | Default |
 //! |-----------|----------------------------------------------------------|---------|
-//! | `kind`    | `ethernet` (including fiber), `wifi`, `halow`, or `modem` for a radio modem on a serial port | `ethernet` |
-//! | `bitrate` | Bits per second, optionally with a `k`, `M` or `G` suffix | `1G` for Ethernet, the modem's own for modems; required for radios |
+//! | `kind`    | `ethernet` (including fiber), `wifi`, `halow`, `modem` for a radio modem on a serial port, or `udp` | `ethernet` |
+//! | `bitrate` | Bits per second, optionally with a `k`, `M` or `G` suffix | `1G` for Ethernet, the modem's own for modems, `10M` for UDP; required for radios |
 //! | `freq`    | Channel frequency in MHz                                 | 2437 for `wifi`, 915 for `halow` |
-//! | `mtu`     | Largest SpectraMesh frame, in bytes                      | The device's MTU, less 2 |
+//! | `mtu`     | Largest SpectraMesh frame, in bytes                      | The device's MTU less 2; 1200 for UDP |
+//! | `peer`    | For `udp`: a peer's `host:port`. Repeatable              | None: learn peers from the frames they send |
 //!
-//! For example, `--hue eth1`, `--hue phy1-mesh0,kind=wifi,freq=5805,bitrate=100M` or
-//! `--hue /dev/ttyACM0,kind=modem`.
+//! For a `udp` hue, the device is the address and port to listen on.
+//!
+//! For example, `--hue eth1`, `--hue phy1-mesh0,kind=wifi,freq=5805,bitrate=100M`,
+//! `--hue /dev/ttyACM0,kind=modem` or `--hue [::]:4790,kind=udp,peer=hub.example.org:4790`.
 
 use spectramesh_core::HueKind;
 use std::path::PathBuf;
@@ -33,13 +36,19 @@ Routes SpectraMesh traffic across the given network devices.
 
 Options:
   --hue SPEC              A network device to route over (repeatable). Settings:
-                            kind=ethernet|wifi|halow|modem (default ethernet;
-                                    modem: DEVICE is a serial port with a
-                                    spectramesh-modem radio on it)
+                            kind=ethernet|wifi|halow|modem|udp (default
+                                    ethernet; modem: DEVICE is a serial port
+                                    with a spectramesh-modem radio on it;
+                                    udp: DEVICE is an address to listen on,
+                                    such as [::]:4790)
                             bitrate=BITS[k|M|G]        (default 1G for ethernet,
-                                                        the modem's own for modems)
+                                                        the modem's own for
+                                                        modems, 10M for udp)
                             freq=MHZ                   (radio channel frequency)
-                            mtu=BYTES                  (default: device MTU less 2)
+                            mtu=BYTES                  (default: device MTU less
+                                                        2; 1200 for udp)
+                            peer=HOST:PORT             (udp: a peer to send to;
+                                                        repeatable)
   --mesh-key-file FILE    The mesh keys, one per line. The first is sent with;
                           any others are also accepted, while keys are changed.
   --identity FILE         This node's secret key, created on first run
@@ -139,12 +148,23 @@ pub struct Config {
 pub struct HueSpec {
     pub device: String,
     pub kind: HueKind,
-    /// Whether `device` is a serial port with a radio modem on it.
-    pub modem: bool,
+    pub link: LinkType,
     /// `None` for a modem, to use its own.
     pub bitrate_bps: Option<u64>,
     /// `None` to use the device's MTU.
     pub mtu: Option<u16>,
+}
+
+/// What a hue's device is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkType {
+    /// A Linux network device that carries Ethernet frames.
+    Ethernet,
+    /// A serial port with a `spectramesh-modem` radio on it.
+    Modem,
+    /// A UDP socket bound to the device, an address and port, which sends
+    /// to `peers` (each `host:port`) and to the neighbors it learns.
+    Udp { peers: Vec<String> },
 }
 
 /// Parses command-line arguments, not including the program name.
@@ -296,6 +316,7 @@ fn parse_hue(spec: &str) -> Result<HueSpec, String> {
     }
 
     let (mut kind, mut bitrate, mut freq, mut mtu) = ("ethernet", None, None, None);
+    let mut peers = Vec::new();
     for part in parts {
         let (key, value) = part
             .split_once('=')
@@ -305,6 +326,7 @@ fn parse_hue(spec: &str) -> Result<HueSpec, String> {
             "bitrate" => bitrate = Some(parse_bitrate(value)?),
             "freq" => freq = Some(parse_number(key, value)?),
             "mtu" => mtu = Some(parse_number(key, value)?),
+            "peer" => peers.push(value.to_string()),
             _ => return Err(format!("unknown setting {key:?} in hue {spec:?}")),
         }
     }
@@ -319,19 +341,38 @@ fn parse_hue(spec: &str) -> Result<HueSpec, String> {
         },
         // The only modem firmware so far speaks ESP-NOW.
         "modem" => HueKind::EspNow,
+        "udp" => HueKind::Ip,
         other => return Err(format!("unknown kind {other:?} in hue {spec:?}")),
     };
-    let modem = kind == HueKind::EspNow;
+    let link = match kind {
+        HueKind::EspNow => LinkType::Modem,
+        HueKind::Ip => {
+            if device.parse::<std::net::SocketAddr>().is_err() {
+                return Err(format!(
+                    "UDP hue {spec:?} must start with an address and port to listen on, \
+                     such as [::]:4790"
+                ));
+            }
+            LinkType::Udp { peers }
+        }
+        _ if !peers.is_empty() => {
+            return Err(format!("only UDP hues have peers, in hue {spec:?}"));
+        }
+        _ => LinkType::Ethernet,
+    };
     let bitrate_bps = match (bitrate, kind) {
         (Some(bitrate), _) => Some(bitrate),
         (None, HueKind::Ethernet) => Some(1_000_000_000),
+        (None, HueKind::Ip) => Some(10_000_000),
         (None, HueKind::EspNow) => None,
         (None, _) => return Err(format!("hue {spec:?} needs a bitrate")),
     };
+    // Small enough for any internet path, with room for tunnels.
+    let mtu = mtu.or((kind == HueKind::Ip).then_some(1200));
     Ok(HueSpec {
         device: device.into(),
         kind,
-        modem,
+        link,
         bitrate_bps,
         mtu,
     })
@@ -387,21 +428,21 @@ mod tests {
                 HueSpec {
                     device: "eth1".into(),
                     kind: HueKind::Ethernet,
-                    modem: false,
+                    link: LinkType::Ethernet,
                     bitrate_bps: Some(1_000_000_000),
                     mtu: None,
                 },
                 HueSpec {
                     device: "phy1-mesh0".into(),
                     kind: HueKind::Wifi { freq_mhz: 5805 },
-                    modem: false,
+                    link: LinkType::Ethernet,
                     bitrate_bps: Some(100_000_000),
                     mtu: None,
                 },
                 HueSpec {
                     device: "wlan2".into(),
                     kind: HueKind::Wifi { freq_mhz: 915 },
-                    modem: false,
+                    link: LinkType::Ethernet,
                     bitrate_bps: Some(2_000_000),
                     mtu: Some(1000),
                 },
@@ -422,7 +463,7 @@ mod tests {
         let config = parse_str("--hue /dev/ttyACM0,kind=modem --mesh-key-file k").unwrap();
         let hue = &config.hues[0];
         assert_eq!(hue.device, "/dev/ttyACM0");
-        assert!(hue.modem);
+        assert_eq!(hue.link, LinkType::Modem);
         assert_eq!(hue.kind, HueKind::EspNow);
         assert_eq!(hue.bitrate_bps, None);
     }
@@ -475,6 +516,31 @@ mod tests {
                 .unwrap_err()
                 .contains("isn't a channel")
         );
+    }
+
+    #[test]
+    fn udp_hues_listen_and_have_peers() {
+        let config = parse_str(
+            "--hue [::]:4790,kind=udp,peer=hub.example.org:4790,peer=192.0.2.7:4790 \
+             --mesh-key-file k",
+        )
+        .unwrap();
+        assert_eq!(
+            config.hues[0],
+            HueSpec {
+                device: "[::]:4790".into(),
+                kind: HueKind::Ip,
+                link: LinkType::Udp {
+                    peers: vec!["hub.example.org:4790".into(), "192.0.2.7:4790".into()]
+                },
+                bitrate_bps: Some(10_000_000),
+                mtu: Some(1200),
+            }
+        );
+        let err = parse_str("--hue eth0,kind=udp --mesh-key-file k").unwrap_err();
+        assert!(err.contains("address and port"), "{err}");
+        let err = parse_str("--hue eth0,peer=a:1 --mesh-key-file k").unwrap_err();
+        assert!(err.contains("only UDP hues have peers"), "{err}");
     }
 
     #[test]

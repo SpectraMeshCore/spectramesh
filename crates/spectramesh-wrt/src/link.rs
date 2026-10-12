@@ -27,6 +27,14 @@ pub type Mac = [u8; 6];
 
 pub const BROADCAST_MAC: Mac = [0xff; 6];
 
+/// A neighbor's address on a hue: a MAC address on Ethernet and radio
+/// modems, or an IP address and port on UDP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LinkAddr {
+    Mac(Mac),
+    Udp(std::net::SocketAddr),
+}
+
 /// A network device, as described in `/sys/class/net`.
 #[derive(Clone, Debug)]
 pub struct Device {

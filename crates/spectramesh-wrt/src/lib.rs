@@ -12,4 +12,5 @@ pub mod logger;
 pub mod modem;
 pub mod provision;
 pub mod tun;
+pub mod udp;
 pub mod web;
