@@ -26,7 +26,7 @@ SPECTRAMESH_MESH_KEY=smk1-... cargo run --release
 SPECTRAMESH_MESH_KEY=$(cat ~/.config/spectramesh/mesh.key) cargo run --release --features xiao-esp32c6
 ```
 
-That builds, flashes and opens the serial monitor. If the log stops at `waiting for download`, the chip is still in its bootloader (for example after starting it in BOOT mode): press RESET, or run `espflash reset --after watchdog-reset`. Firmware built without a key logs an error and doesn't start. Treat built firmware images like the key itself. `rust-toolchain.toml` makes rustup add the RISC-V target and Rust's source code on the first build.
+Add `SPECTRAMESH_NAME=...` to name the node on the mesh map. That builds, flashes and opens the serial monitor. If the log stops at `waiting for download`, the chip is still in its bootloader (for example after starting it in BOOT mode): press RESET, or run `espflash reset --after watchdog-reset`. Firmware built without a key logs an error and doesn't start. Treat built firmware images like the key itself. `rust-toolchain.toml` makes rustup add the RISC-V target and Rust's source code on the first build.
 
 This crate is excluded from the root workspace because it builds for the board, not your computer. Run cargo commands from this directory.
 

@@ -63,6 +63,12 @@ The TUN device needs root or `CAP_NET_ADMIN`. Its MTU is the smallest hue's MTU 
 
 Packets arriving from the mesh are only passed to the system if their source address belongs to the node that sent them. Packets to an address in the mesh that no node has are answered straight away with an ICMPv6 "destination unreachable" error.
 
+### The mesh map
+
+`--web 127.0.0.1:8470` serves a live map of the mesh at that address: every node and link, drawn as a graph you can drag around, with link types colored, plus tables of nodes and of this node's routes. It updates every 2 seconds and needs no internet connection. `--name` labels this node on it.
+
+The map comes from **neighbor reports**: every node, ESP32s included, floods its name and links once a minute, and again shortly after it meets a new neighbor. The page is served without authentication and shows the mesh's layout, so keep it on `127.0.0.1` unless you mean to share it. `GET /api/mesh` returns the same data as JSON.
+
 ### Channels
 
 Channels carry encrypted group messages across the whole mesh. Make a key with `spectrameshd --generate-channel-key`, give it to every member, and list it in a file passed with `--channel-key-file` (one key per line). Every node relays channel messages, but only members can read them. For now the daemon logs the messages it receives; a local interface for programs to send and receive on channels is still to come.

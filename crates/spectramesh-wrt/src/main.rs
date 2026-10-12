@@ -9,6 +9,7 @@ mod link;
 mod logger;
 mod modem;
 mod tun;
+mod web;
 
 use std::io;
 use std::process::ExitCode;
@@ -216,6 +217,19 @@ fn run(config: Config) -> io::Error {
         info!("joined channel {}", channel.id());
         router.join_channel(channel);
     }
+    if let Some(name) = &config.name {
+        router.set_name(name);
+    }
+    let snapshot = match config.web {
+        Some(address) => {
+            let snapshot = web::Snapshot::default();
+            if let Err(err) = web::serve(address, snapshot.clone()) {
+                return io::Error::new(err.kind(), format!("serving the map on {address}: {err}"));
+            }
+            Some(snapshot)
+        }
+        None => None,
+    };
     let devices: Vec<&str> = hues.iter().map(|h| h.device.as_str()).collect();
     info!(
         "SpectraMesh node {node_id} running on {}",
@@ -243,5 +257,5 @@ fn run(config: Config) -> io::Error {
         },
     };
 
-    daemon::run(router, hues, tun, config.report_interval)
+    daemon::run(router, hues, tun, snapshot, config.report_interval)
 }

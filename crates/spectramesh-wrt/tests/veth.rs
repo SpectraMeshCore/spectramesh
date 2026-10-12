@@ -56,6 +56,16 @@ fn daemons_carry_ipv6_through_each_other_and_keep_outsiders_out() {
     // An address no node has gets an immediate ICMPv6 error.
     assert!(has("Destination unreachable: No route"), "{log}");
 
+    // Node 1's map shows the three member nodes, by name, but not the outsider.
+    let map = log
+        .lines()
+        .find_map(|l| l.strip_prefix("[node 1 map] "))
+        .unwrap_or_else(|| panic!("no map in:\n{log}"));
+    for name in ["node 1", "node 2", "node 3"] {
+        assert!(map.contains(&format!("\"name\":\"{name}\"")), "{map}");
+    }
+    assert!(!map.contains(id("node 4")), "{map}");
+
     // The outsider is dropped by node 2 and learns nothing.
     assert!(
         has("[node 2] warning: dropped a frame on hue 2: frame tag doesn't verify"),

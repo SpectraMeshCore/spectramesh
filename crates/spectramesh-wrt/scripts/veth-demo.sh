@@ -61,12 +61,16 @@ unshare --user --map-root-user --net sh -eu -c '
 				hues=\"\$hues --hue \$hue\"
 			done
 			\"\$bin\" --identity \"\$dir/\$name.id\" --mesh-key-file \"\$dir/\$key\" --tun smesh0 \
+				--name \"\$name\" --web 127.0.0.1:8470 \
 				--report-interval \$((seconds - 1)) \$hues 2>&1 | sed \"s/^/[\$name] /\" &
 			if [ -n \"\$ping\" ]; then
 				sleep \$((seconds - 9))
 				ping -6 -c 3 -W 2 \$ping 2>&1 | sed \"s/^/[\$name ping] /\" || true
 				ping -6 -c 3 -W 2 -s 1200 \$ping 2>&1 | sed \"s/^/[\$name big ping] /\" || true
 				ping -6 -c 1 -W 2 \$nowhere 2>&1 | sed \"s/^/[\$name nowhere ping] /\" || true
+				# The map, as the web page sees it.
+				curl -s http://127.0.0.1:8470/api/mesh | sed \"s/^/[\$name map] /\" || true
+				echo
 			fi
 			wait
 		" node "$name" "$bin" "$dir" "$key" "$seconds" "$ping" "$nowhere" "$@" &

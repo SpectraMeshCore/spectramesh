@@ -148,6 +148,10 @@ impl Router {
         self.name = String::from(report::clip_name(name));
     }
 
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// The mesh as the neighbor reports describe it: the latest report from
     /// every node heard from recently, this one included.
     pub fn mesh_map(&self) -> impl Iterator<Item = &NodeReport> {

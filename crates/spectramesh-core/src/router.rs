@@ -440,6 +440,9 @@ impl Router {
             dest: NodeId::BROADCAST,
         };
         self.send_control(hue, key.0, &[request]);
+        // Put the new neighbor on each other's map soon, not at the next
+        // scheduled report: once a few hellos have measured the link.
+        self.next_report = self.next_report.min(now + Duration::from_secs(10));
         Ok(())
     }
 

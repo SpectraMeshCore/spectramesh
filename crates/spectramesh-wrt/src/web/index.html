@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpectraMesh map</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --text: #1d2330;
+    --muted: #5f6878;
+    --line: #dfe3ea;
+    --node: #ffffff;
+    --node-stroke: #2a3240;
+    --self: #2f6fed;
+    --stale: #9aa3b2;
+    --ethernet: #3b4252;
+    --wifi: #2f6fed;
+    --esp-now: #0f9d76;
+    --fsk: #c26a00;
+    --lora: #b8399b;
+    --ip: #7a5af5;
+    --warn: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11141a;
+      --panel: #1a1f28;
+      --text: #e6e9ef;
+      --muted: #9aa3b2;
+      --line: #2c3340;
+      --node: #1a1f28;
+      --node-stroke: #c9d1de;
+      --self: #6b9bff;
+      --stale: #5d6676;
+      --ethernet: #c9d1de;
+      --wifi: #6b9bff;
+      --esp-now: #3ccf9f;
+      --fsk: #f0a040;
+      --lora: #e070c8;
+      --ip: #a58bff;
+      --warn: #ff7b6e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 16px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  header h1 { margin: 0; font-size: 17px; font-weight: 650; }
+  #whoami { color: var(--muted); }
+  #status { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #status.lost { color: var(--warn); }
+  main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 360px;
+    gap: 16px;
+    padding: 16px;
+    min-height: calc(100vh - 50px);
+  }
+  @media (max-width: 860px) {
+    main { grid-template-columns: minmax(0, 1fr); }
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    min-width: 0;
+  }
+  #map-card { position: relative; min-height: 420px; }
+  svg { display: block; width: 100%; height: 100%; min-height: 420px; touch-action: none; }
+  .edge { stroke-linecap: round; }
+  .edge.one-way { stroke-dasharray: 4 4; }
+  .edge.dim, .node.dim { opacity: 0.15; }
+  .node circle { fill: var(--node); stroke: var(--node-stroke); stroke-width: 2; cursor: grab; }
+  .node.self circle { fill: var(--self); stroke: var(--self); }
+  .node.stale circle { stroke: var(--stale); stroke-dasharray: 3 3; }
+  .node.selected circle { stroke-width: 4; }
+  .node text {
+    fill: var(--text);
+    font-size: 12px;
+    paint-order: stroke;
+    stroke: var(--bg);
+    stroke-width: 3px;
+    pointer-events: none;
+  }
+  #legend {
+    position: absolute;
+    left: 12px;
+    bottom: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  #legend span::before {
+    content: "";
+    display: inline-block;
+    width: 16px;
+    height: 3px;
+    margin-right: 5px;
+    vertical-align: middle;
+    background: var(--swatch);
+    border-radius: 2px;
+  }
+  [hidden] { display: none !important; }
+  #empty {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: var(--muted);
+    padding: 24px;
+    text-align: center;
+  }
+  aside { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  aside .card { padding: 12px 14px; }
+  h2 { margin: 0 0 8px; font-size: 13px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 5px 6px 5px 0; border-top: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); border-top: none; font-size: 12px; }
+  td.num { text-align: right; padding-right: 0; }
+  tr.clickable { cursor: pointer; }
+  tr.selected td { background: color-mix(in srgb, var(--self) 12%, transparent); }
+  .id { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 12px; color: var(--muted); }
+  .scroll { max-height: 40vh; overflow: auto; }
+  #details:empty { display: none; }
+  #details dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; }
+  #details dt { color: var(--muted); }
+  #details dd { margin: 0; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SpectraMesh</h1>
+  <span id="whoami"></span>
+  <span id="status" role="status" aria-live="polite">Connecting…</span>
+</header>
+<main>
+  <section class="card" id="map-card" aria-label="Mesh map">
+    <svg id="map" role="img" aria-label="Map of mesh nodes and links"></svg>
+    <div id="empty" hidden>No neighbor reports yet. Nodes report every minute, so the map fills in shortly after they start.</div>
+    <div id="legend" aria-hidden="true"></div>
+  </section>
+  <aside>
+    <section class="card" id="details" aria-live="polite"></section>
+    <section class="card">
+      <h2>Nodes</h2>
+      <div class="scroll"><table id="nodes"><thead><tr><th>Name</th><th class="num">Links</th><th class="num">Report</th></tr></thead><tbody></tbody></table></div>
+    </section>
+    <section class="card">
+      <h2>Routes from this node</h2>
+      <div class="scroll"><table id="routes"><thead><tr><th>To</th><th>Via</th><th class="num">Cost</th></tr></thead><tbody></tbody></table></div>
+    </section>
+  </aside>
+</main>
+<script>
+"use strict";
+
+// Everything shown here comes from other nodes, so it's only ever inserted
+// as text, never as HTML.
+
+const KINDS = {
+  "ethernet": "Ethernet",
+  "wifi": "Wi-Fi",
+  "esp-now": "ESP-NOW",
+  "fsk": "FSK",
+  "lora": "LoRa",
+  "ip": "IP",
+};
+const SVG = "http://www.w3.org/2000/svg";
+const svg = document.getElementById("map");
+const edgeLayer = document.createElementNS(SVG, "g");
+const nodeLayer = document.createElementNS(SVG, "g");
+svg.append(edgeLayer, nodeLayer);
+
+let mesh = null;
+let selected = null;
+let lastUpdate = 0;
+/** Layout state by node ID: position, velocity, and the SVG elements. */
+const layout = new Map();
+const edgeEls = new Map();
+
+for (const [kind, label] of Object.entries(KINDS)) {
+  const item = document.createElement("span");
+  item.textContent = label;
+  item.style.setProperty("--swatch", `var(--${kind})`);
+  document.getElementById("legend").append(item);
+}
+
+function label(id) {
+  const node = mesh && mesh.nodes.find(n => n.id === id);
+  return node && node.name ? node.name : id.slice(0, 9);
+}
+
+function linkLabel(link) {
+  const kind = KINDS[link.kind] || link.kind;
+  const freq = link.freq_mhz ? ` ${link.freq_mhz >= 1000 ? (link.freq_mhz / 1000).toFixed(1) + " GHz" : link.freq_mhz + " MHz"}` : "";
+  return kind + freq;
+}
+
+function cost(us) {
+  return us >= 1000 ? `${(us / 1000).toFixed(1)} ms` : `${us} µs`;
+}
+
+/** One edge per pair of nodes and link kind, noting whether both ends reported it. */
+function edges() {
+  const found = new Map();
+  for (const node of mesh.nodes) {
+    for (const link of node.links) {
+      const [a, b] = [node.id, link.to].sort();
+      const key = `${a}|${b}|${link.kind}`;
+      const edge = found.get(key) || { key, a, b, kind: link.kind, links: [], reporters: new Set() };
+      edge.links.push({ from: node.id, ...link });
+      edge.reporters.add(node.id);
+      found.set(key, edge);
+    }
+  }
+  return [...found.values()];
+}
+
+/** Every node on the map: those that reported, those they mention, and route destinations. */
+function nodeIds() {
+  const ids = new Set(mesh.nodes.map(n => n.id));
+  for (const node of mesh.nodes) for (const link of node.links) ids.add(link.to);
+  for (const route of mesh.routes) ids.add(route.dest);
+  ids.add(mesh.self);
+  return [...ids];
+}
+
+function render() {
+  const ids = nodeIds();
+  const all = edges();
+  const rect = svg.getBoundingClientRect();
+  const [w, h] = [rect.width || 600, rect.height || 420];
+
+  // Nodes: keep positions across updates; new nodes start near a neighbor.
+  for (const id of ids) {
+    if (layout.has(id)) continue;
+    const neighbor = all.find(e => (e.a === id || e.b === id) && layout.has(e.a === id ? e.b : e.a));
+    const anchor = neighbor ? layout.get(neighbor.a === id ? neighbor.b : neighbor.a) : { x: w / 2, y: h / 2 };
+    const g = document.createElementNS(SVG, "g");
+    g.classList.add("node");
+    const circle = document.createElementNS(SVG, "circle");
+    circle.setAttribute("r", 9);
+    const text = document.createElementNS(SVG, "text");
+    text.setAttribute("x", 13);
+    text.setAttribute("y", 4);
+    const title = document.createElementNS(SVG, "title");
+    g.append(circle, text, title);
+    nodeLayer.append(g);
+    const state = { x: anchor.x + (Math.random() - 0.5) * 60, y: anchor.y + (Math.random() - 0.5) * 60, vx: 0, vy: 0, g, text, title };
+    layout.set(id, state);
+    g.addEventListener("pointerdown", event => startDrag(event, id));
+    g.addEventListener("click", () => select(id));
+  }
+  for (const [id, state] of layout) {
+    if (!ids.includes(id)) { state.g.remove(); layout.delete(id); }
+  }
+  for (const id of ids) {
+    const state = layout.get(id);
+    const report = mesh.nodes.find(n => n.id === id);
+    state.text.textContent = label(id);
+    state.title.textContent = `${label(id)}\n${id}` + (report ? `\nreported ${report.age_s} s ago` : "\nno report yet");
+    state.g.classList.toggle("self", id === mesh.self);
+    state.g.classList.toggle("stale", !report);
+  }
+
+  // Edges.
+  const keys = new Set(all.map(e => e.key));
+  for (const [key, el] of edgeEls) {
+    if (!keys.has(key)) { el.line.remove(); edgeEls.delete(key); }
+  }
+  for (const edge of all) {
+    let el = edgeEls.get(edge.key);
+    if (!el) {
+      const line = document.createElementNS(SVG, "line");
+      line.classList.add("edge");
+      const title = document.createElementNS(SVG, "title");
+      line.append(title);
+      edgeLayer.append(line);
+      el = { line, title };
+      edgeEls.set(edge.key, el);
+    }
+    el.edge = edge;
+    const worst = Math.max(...edge.links.map(l => l.cost));
+    el.line.setAttribute("stroke", `var(--${edge.kind}, var(--muted))`);
+    el.line.setAttribute("stroke-width", edge.reporters.size > 1 ? 3 : 2);
+    el.line.classList.toggle("one-way", edge.reporters.size < 2);
+    el.title.textContent = `${label(edge.a)} – ${label(edge.b)}\n${linkLabel(edge.links[0])}, ${cost(worst)}` +
+      (edge.reporters.size < 2 ? "\nreported by one end only" : "");
+  }
+
+  renderTables();
+  applySelection();
+  document.getElementById("empty").hidden = mesh.nodes.length > 0;
+}
+
+function renderTables() {
+  const nodesBody = document.querySelector("#nodes tbody");
+  nodesBody.replaceChildren(...nodeIds().sort((a, b) => label(a).localeCompare(label(b))).map(id => {
+    const report = mesh.nodes.find(n => n.id === id);
+    const row = document.createElement("tr");
+    row.classList.add("clickable");
+    row.dataset.id = id;
+    row.addEventListener("click", () => select(id));
+    const name = document.createElement("td");
+    name.textContent = label(id) + (id === mesh.self ? " (this node)" : "");
+    const idLine = document.createElement("div");
+    idLine.className = "id";
+    idLine.textContent = id;
+    name.append(idLine);
+    row.append(name, cell(report ? report.links.length : "–", true), cell(report ? `${report.age_s} s` : "none", true));
+    return row;
+  }));
+
+  const routesBody = document.querySelector("#routes tbody");
+  routesBody.replaceChildren(...[...mesh.routes].sort((a, b) => a.cost - b.cost).map(route => {
+    const row = document.createElement("tr");
+    row.classList.add("clickable");
+    row.dataset.id = route.dest;
+    row.addEventListener("click", () => select(route.dest));
+    const via = route.next_hop === route.dest ? `direct, ${route.hue}` : `${label(route.next_hop)}, ${route.hue}`;
+    row.append(cell(label(route.dest)), cell(via), cell(cost(route.cost), true));
+    return row;
+  }));
+  if (!mesh.routes.length) routesBody.append(emptyRow(3, "No routes yet"));
+}
+
+function cell(text, num) {
+  const td = document.createElement("td");
+  td.textContent = text;
+  if (num) td.className = "num";
+  return td;
+}
+
+function emptyRow(span, text) {
+  const row = document.createElement("tr");
+  const td = cell(text);
+  td.colSpan = span;
+  td.style.color = "var(--muted)";
+  row.append(td);
+  return row;
+}
+
+function select(id) {
+  selected = selected === id ? null : id;
+  applySelection();
+}
+
+function applySelection() {
+  if (selected && !layout.has(selected)) selected = null;
+  for (const [id, state] of layout) {
+    const linked = !selected || id === selected || [...edgeEls.values()].some(el =>
+      (el.edge.a === selected && el.edge.b === id) || (el.edge.b === selected && el.edge.a === id));
+    state.g.classList.toggle("dim", !linked);
+    state.g.classList.toggle("selected", id === selected);
+  }
+  for (const el of edgeEls.values()) {
+    el.line.classList.toggle("dim", Boolean(selected) && el.edge.a !== selected && el.edge.b !== selected);
+  }
+  for (const row of document.querySelectorAll("tr[data-id]")) {
+    row.classList.toggle("selected", row.dataset.id === selected);
+  }
+
+  const details = document.getElementById("details");
+  if (!selected) { details.replaceChildren(); return; }
+  const report = mesh.nodes.find(n => n.id === selected);
+  const route = mesh.routes.find(r => r.dest === selected);
+  const heading = document.createElement("h2");
+  heading.textContent = label(selected);
+  const list = document.createElement("dl");
+  const add = (term, value) => {
+    const dt = document.createElement("dt");
+    dt.textContent = term;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    list.append(dt, dd);
+  };
+  add("Node ID", selected);
+  if (selected === mesh.self) add("Role", "This node");
+  if (route) add("Route", `via ${route.next_hop === route.dest ? "direct link" : label(route.next_hop)} on ${route.hue}, ${cost(route.cost)}`);
+  if (report) {
+    add("Report", `${report.age_s} s ago`);
+    for (const link of report.links) add(label(link.to), `${linkLabel(link)}, ${cost(link.cost)}`);
+  } else {
+    add("Report", "none yet");
+  }
+  details.replaceChildren(heading, list);
+}
+
+// Force-directed layout: nodes repel, links pull, and everything drifts to the middle.
+let dragging = null;
+function startDrag(event, id) {
+  dragging = id;
+  svg.setPointerCapture(event.pointerId);
+}
+svg.addEventListener("pointermove", event => {
+  if (!dragging) return;
+  const rect = svg.getBoundingClientRect();
+  const state = layout.get(dragging);
+  if (state) { state.x = event.clientX - rect.left; state.y = event.clientY - rect.top; state.vx = state.vy = 0; }
+});
+svg.addEventListener("pointerup", () => { dragging = null; });
+
+function tick() {
+  const rect = svg.getBoundingClientRect();
+  const [w, h] = [rect.width || 600, rect.height || 420];
+  const nodes = [...layout.entries()];
+  for (let i = 0; i < nodes.length; i++) {
+    const [, a] = nodes[i];
+    for (let j = i + 1; j < nodes.length; j++) {
+      const [, b] = nodes[j];
+      let dx = a.x - b.x, dy = a.y - b.y;
+      const d2 = Math.max(dx * dx + dy * dy, 25);
+      const force = 1800 / d2;
+      const d = Math.sqrt(d2);
+      dx /= d; dy /= d;
+      a.vx += dx * force; a.vy += dy * force;
+      b.vx -= dx * force; b.vy -= dy * force;
+    }
+  }
+  for (const el of edgeEls.values()) {
+    const a = layout.get(el.edge.a), b = layout.get(el.edge.b);
+    if (!a || !b) continue;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const d = Math.max(Math.hypot(dx, dy), 1);
+    const pull = (d - 110) * 0.02;
+    a.vx += dx / d * pull; a.vy += dy / d * pull;
+    b.vx -= dx / d * pull; b.vy -= dy / d * pull;
+  }
+  for (const [id, s] of nodes) {
+    s.vx += (w / 2 - s.x) * 0.002;
+    s.vy += (h / 2 - s.y) * 0.002;
+    if (id !== dragging) {
+      s.vx *= 0.82; s.vy *= 0.82;
+      s.x = Math.min(Math.max(s.x + s.vx, 16), w - 16);
+      s.y = Math.min(Math.max(s.y + s.vy, 16), h - 16);
+    }
+    s.g.setAttribute("transform", `translate(${s.x.toFixed(1)} ${s.y.toFixed(1)})`);
+  }
+  for (const el of edgeEls.values()) {
+    const a = layout.get(el.edge.a), b = layout.get(el.edge.b);
+    if (!a || !b) continue;
+    el.line.setAttribute("x1", a.x.toFixed(1)); el.line.setAttribute("y1", a.y.toFixed(1));
+    el.line.setAttribute("x2", b.x.toFixed(1)); el.line.setAttribute("y2", b.y.toFixed(1));
+  }
+  requestAnimationFrame(tick);
+}
+
+async function refresh() {
+  try {
+    const response = await fetch("/api/mesh", { cache: "no-store" });
+    if (!response.ok) throw new Error(response.status);
+    mesh = await response.json();
+    lastUpdate = Date.now();
+    document.getElementById("whoami").textContent =
+      `this node: ${mesh.name || mesh.self}${mesh.name ? " (" + mesh.self + ")" : ""}`;
+    render();
+  } catch (err) {
+    // Shown by the status line below.
+  }
+  const status = document.getElementById("status");
+  const age = (Date.now() - lastUpdate) / 1000;
+  const lost = !lastUpdate || age > 6;
+  status.classList.toggle("lost", lost);
+  status.textContent = !lastUpdate ? "Can't reach spectrameshd" : lost ? `No update for ${Math.round(age)} s` :
+    `${mesh.nodes.length} reporting node${mesh.nodes.length === 1 ? "" : "s"} · live`;
+}
+
+refresh();
+setInterval(refresh, 2000);
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

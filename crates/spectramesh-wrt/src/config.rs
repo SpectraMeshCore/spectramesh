@@ -39,6 +39,10 @@ Options:
   --identity FILE         This node's secret key, created on first run
                           (default /etc/spectramesh/node.key)
   --channel-key-file FILE Channel keys to join, one per line
+  --name NAME             This node's name on the mesh map (up to 32 bytes)
+  --web ADDRESS           Serve a live map of the mesh, such as
+                          127.0.0.1:8470 (shows the mesh's layout, so keep
+                          it local unless you mean to share it)
   --tun NAME              Carry IPv6 over the mesh through TUN device NAME,
                           with this node's address on it
   --ipv6-prefix PREFIX    The mesh's /64, such as fd12:3456:789a:: (default:
@@ -72,6 +76,8 @@ pub struct Config {
     pub identity_file: PathBuf,
     pub mesh_key_file: PathBuf,
     pub channel_key_file: Option<PathBuf>,
+    pub name: Option<String>,
+    pub web: Option<std::net::SocketAddr>,
     pub hues: Vec<HueSpec>,
     pub tun: Option<String>,
     pub ipv6_prefix: Option<[u8; 8]>,
@@ -101,6 +107,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     let mut generate = false;
     let mut generate_channel = false;
     let mut channel_key_file = None;
+    let mut name = None;
+    let mut web = None;
     let mut node_info = false;
     let mut tun = None;
     let mut ipv6_prefix = None;
@@ -115,6 +123,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
             "--generate-mesh-key" => generate = true,
             "--generate-channel-key" => generate_channel = true,
             "--channel-key-file" => channel_key_file = Some(value("--channel-key-file")?.into()),
+            "--name" => name = Some(value("--name")?),
+            "--web" => {
+                let address = value("--web")?;
+                web = Some(address.parse().map_err(|_| {
+                    format!("invalid --web address {address:?}; try 127.0.0.1:8470")
+                })?);
+            }
             "--node-info" => node_info = true,
             "--tun" => tun = Some(value("--tun")?),
             "--ipv6-prefix" => ipv6_prefix = Some(parse_prefix(&value("--ipv6-prefix")?)?),
@@ -150,6 +165,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
         identity_file,
         mesh_key_file,
         channel_key_file,
+        name,
+        web,
         hues,
         tun,
         ipv6_prefix,

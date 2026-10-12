@@ -20,6 +20,7 @@ use crate::icmp;
 use crate::link::{BROADCAST_MAC, EthernetSocket, Mac};
 use crate::modem::{Modem, ModemReader};
 use crate::tun::{Prefix, Tun, addresses};
+use crate::web::{self, Snapshot};
 
 /// A hue ready to run: its router ID, its device's name, and how to send
 /// and receive on it.
@@ -74,6 +75,7 @@ pub fn run(
     mut router: Router,
     hues: Vec<Hue>,
     tun: Option<(Tun, Prefix)>,
+    snapshot: Option<Snapshot>,
     report_interval: Duration,
 ) -> io::Error {
     let (inbox, events) = mpsc::channel();
@@ -95,6 +97,19 @@ pub fn run(
         });
     }
     let hues = senders;
+    // Names for the map: device names, and something shorter for modems'
+    // serial port paths.
+    let hue_names: Vec<(u8, String)> = hues
+        .iter()
+        .map(|h| {
+            let name = match h.link {
+                Link::Modem(_) => "ESP-NOW via modem".to_string(),
+                Link::Ethernet(_) => h.device.clone(),
+            };
+            (h.id.0, name)
+        })
+        .collect();
+    let mut next_snapshot = Instant::default();
     let mut tun = match tun {
         Some((tun, prefix)) => {
             let reader = match tun.try_clone() {
@@ -198,6 +213,12 @@ pub fn run(
                     None => info!("{} bytes from {}", delivery.payload.len(), delivery.src),
                 },
             }
+        }
+
+        if let Some(snapshot) = snapshot.as_ref().filter(|_| now() >= next_snapshot) {
+            next_snapshot = now() + Duration::from_secs(1);
+            let json = web::snapshot_json(&router, &hue_names, now());
+            *snapshot.lock().expect("no panics while holding it") = json;
         }
 
         if now() >= next_report {

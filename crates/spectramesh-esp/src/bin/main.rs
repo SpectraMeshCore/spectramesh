@@ -39,6 +39,10 @@ esp_bootloader_esp_idf::esp_app_desc!();
 // one firmware image works for every mesh.
 const MESH_KEY: Option<&str> = option_env!("SPECTRAMESH_MESH_KEY");
 
+/// This node's name on the mesh map, set when building:
+/// `SPECTRAMESH_NAME=roof cargo run --release`. Optional.
+const NAME: Option<&str> = option_env!("SPECTRAMESH_NAME");
+
 /// The Wi-Fi channel every node's ESP-NOW hue uses.
 const ESPNOW_CHANNEL: u8 = 1;
 
@@ -127,6 +131,9 @@ async fn main(spawner: Spawner) -> ! {
         "startup: identity {identity_ms} ms (flash and key derivation), router {router_ms} ms (signing)"
     );
     router.add_hue(espnow::hue_info(ESPNOW_HUE));
+    if let Some(name) = NAME {
+        router.set_name(name);
+    }
 
     spawner.spawn(espnow_receive_task(receiver).expect("task already running"));
     spawner.spawn(espnow_send_task(sender).expect("task already running"));
