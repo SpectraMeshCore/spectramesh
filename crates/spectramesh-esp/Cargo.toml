@@ -8,6 +8,10 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/SpectraMeshCore/spectramesh"
 publish = false
 
+[features]
+# Seeed XIAO ESP32-C6: power its antenna switch and use the built-in antenna.
+xiao-esp32c6 = []
+
 [[bin]]
 name = "spectramesh-esp"
 path = "./src/bin/main.rs"

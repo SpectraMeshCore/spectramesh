@@ -257,7 +257,9 @@ A packet to that address routes straight to the node, with no address assignment
 
 **Keeping the core sans-IO:** the platform passes the router a 32-byte seed from its hardware or OS random number generator at startup (the ESP32's RNG, or `getrandom` on Linux), the same way it supplies time. Nonces, boot indexes and handshake keys come from a generator keyed with that seed. Key storage stays in the platform crates.
 
-**ESP32-C6 performance:** expect X25519 and Ed25519 operations to take milliseconds in software. They're only needed for handshakes, roughly one per peer every 2 minutes. ChaCha20 and BLAKE2s are fast in software, and the C6's AES and SHA accelerators aren't needed. **To be measured** on the XIAO boards.
+**ESP32-C6 performance:** measured on a XIAO ESP32-C6 at 160 MHz (2026-10-11): deriving a node's two public keys took 45 ms including a flash read, and one Ed25519 signature 53 ms. Curve operations take tens of milliseconds in software, so a Noise handshake should cost roughly 100–200 ms per side, once per peer every 2 minutes, and checking a seqno proof a similar amount. ChaCha20 and BLAKE2s are fast in software, and the C6's AES and SHA accelerators aren't needed.
+
+Proof checks happen once per destination when a node joins, and run on the router's task, so a node joining a large mesh spends a few seconds on them while its radio queue waits. Spreading that work out, or curve25519-dalek's precomputed tables (faster, at a few tens of kilobytes of flash), are options if that turns out to matter.
 
 **Linux routers:** ChaCha20-Poly1305 gives WireGuard-class throughput. Exact numbers for MIPS and ARM routers are **to be measured**.
 

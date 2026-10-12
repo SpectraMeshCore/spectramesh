@@ -8,6 +8,8 @@ Built on Espressif's Rust stack ([`esp-hal`](https://github.com/esp-rs/esp-hal),
 
 Any **ESP32-C6** dev board. You need at least two to see a mesh form, and three in a line to see one relay for another.
 
+On a **Seeed XIAO ESP32-C6**, build with `--features xiao-esp32c6`. The XIAO routes its antenna through an RF switch that firmware must power (GPIO3 low) and point at the built-in antenna (GPIO14 low), as Seeed's Arduino support does; without the feature, the radio may barely reach.
+
 ## Build and flash
 
 You need [`espflash`](https://github.com/esp-rs/espflash) once:
@@ -20,9 +22,11 @@ Every node in a mesh needs the same mesh key, which is built into the firmware f
 
 ```
 SPECTRAMESH_MESH_KEY=smk1-... cargo run --release
+# or, on a XIAO ESP32-C6, with the key kept in a file:
+SPECTRAMESH_MESH_KEY=$(cat ~/.config/spectramesh/mesh.key) cargo run --release --features xiao-esp32c6
 ```
 
-That builds, flashes and opens the serial monitor. Firmware built without a key logs an error and doesn't start. Treat built firmware images like the key itself. `rust-toolchain.toml` makes rustup add the RISC-V target and Rust's source code on the first build.
+That builds, flashes and opens the serial monitor. If the log stops at `waiting for download`, the chip is still in its bootloader (for example after starting it in BOOT mode): press RESET, or run `espflash reset --after watchdog-reset`. Firmware built without a key logs an error and doesn't start. Treat built firmware images like the key itself. `rust-toolchain.toml` makes rustup add the RISC-V target and Rust's source code on the first build.
 
 This crate is excluded from the root workspace because it builds for the board, not your computer. Run cargo commands from this directory.
 

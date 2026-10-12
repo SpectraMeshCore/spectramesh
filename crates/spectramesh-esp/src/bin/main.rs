@@ -11,6 +11,8 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
+#[cfg(feature = "xiao-esp32c6")]
+use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::esp_now::{EspNowReceiver, EspNowSender};
@@ -71,6 +73,16 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
+    // The XIAO ESP32-C6 routes its antenna through an RF switch: GPIO3 low
+    // powers the switch, and GPIO14 low selects the built-in antenna (high
+    // selects the external connector). Seeed's Arduino support does the same.
+    // Kept alive for as long as main runs, which is forever.
+    #[cfg(feature = "xiao-esp32c6")]
+    let _antenna = (
+        Output::new(peripherals.GPIO3, Level::Low, OutputConfig::default()),
+        Output::new(peripherals.GPIO14, Level::Low, OutputConfig::default()),
+    );
+
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 65536);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -92,8 +104,12 @@ async fn main(spawner: Spawner) -> ! {
         WifiController::new(peripherals.WIFI, Default::default()).expect("failed to start Wi-Fi");
     // With Wi-Fi running, the hardware RNG is a true random source.
     let rng = Rng::new();
+    // Timed, as a measure of the elliptic-curve work on this chip: deriving
+    // both public keys, and below, the router's first Ed25519 signature.
+    let started = embassy_time::Instant::now();
     let identity = identity_store::load_or_create(peripherals.FLASH, &rng)
         .expect("failed to read or store this node's identity in flash");
+    let identity_ms = started.elapsed().as_millis();
     let id = identity.node_id();
     let mut seed = [0u8; 32];
     rng.read(&mut seed);
@@ -104,7 +120,12 @@ async fn main(spawner: Spawner) -> ! {
         .expect("failed to set the ESP-NOW channel");
     let (_manager, sender, receiver) = esp_now.split();
 
+    let started = embassy_time::Instant::now();
     let mut router = Router::new(identity, KeyRing::new(&mesh_key), Config::default(), seed);
+    let router_ms = started.elapsed().as_millis();
+    info!(
+        "startup: identity {identity_ms} ms (flash and key derivation), router {router_ms} ms (signing)"
+    );
     router.add_hue(espnow::hue_info(ESPNOW_HUE));
 
     spawner.spawn(espnow_receive_task(receiver).expect("task already running"));
