@@ -187,10 +187,12 @@ Encrypted mesh needs a full `wpad` package (such as `wpad-mbedtls`) instead of t
 | File | Role |
 |---|---|
 | `src/main.rs` | Opens each device and starts the daemon |
+| `src/lib.rs` | The modules below, as a library, so they can be tested and fuzzed on their own |
 | `src/config.rs` | Command-line options |
 | `src/keys.rs` | The node's identity file, mesh key files, and random numbers from the kernel |
 | `src/link.rs` | Raw Ethernet sockets. With `tun.rs`'s device setup and `keys.rs`'s call for random numbers, the only `unsafe` code in the project |
 | `src/tun.rs` | The TUN device for IPv6, and mesh addresses |
+| `src/provision.rs` | `--provision`: gives an ESP32 node its keys and name over USB |
 | `src/control.rs` | The control socket, and the `--send`, `--listen` and `--channels` client commands |
 | `src/daemon.rs` | One receive thread per hue and one for the TUN device, plus the router thread, which also learns neighbors' MAC addresses from frames the router has authenticated |
 | `openwrt/` | The package Makefile, the procd init script and the default UCI config |

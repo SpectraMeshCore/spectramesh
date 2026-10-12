@@ -1,18 +1,6 @@
 //! `spectrameshd`: the SpectraMesh routing daemon for OpenWRT and other Linux
 //! systems. See `config.rs` for its options.
 
-mod config;
-mod control;
-mod daemon;
-mod icmp;
-mod keys;
-mod link;
-mod logger;
-mod modem;
-mod provision;
-mod tun;
-mod web;
-
 use std::io;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -26,10 +14,11 @@ use spectramesh_core::{
     TRANSPORT_OVERHEAD,
 };
 
-use crate::config::{Command, Config, Destination, USAGE};
-use crate::link::{Device, EthernetSocket, LENGTH_PREFIX_LEN};
-use crate::modem::Modem;
-use crate::tun::{IPV6_MIN_MTU, Prefix, Tun};
+use spectramesh_wrt::config::{self, Command, Config, Destination, USAGE};
+use spectramesh_wrt::link::{Device, EthernetSocket, LENGTH_PREFIX_LEN};
+use spectramesh_wrt::modem::Modem;
+use spectramesh_wrt::tun::{IPV6_MIN_MTU, Prefix, Tun};
+use spectramesh_wrt::{control, daemon, keys, logger, provision, web};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

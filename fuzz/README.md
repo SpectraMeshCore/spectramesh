@@ -1,6 +1,6 @@
 # Fuzzing
 
-Fuzz targets for the parsers in `spectramesh-core`, run with
+Fuzz targets for the parsers in `spectramesh-core` and `spectramesh-wrt`, run with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) on a nightly toolchain.
 
 | Target       | What it feeds                                                        |
@@ -10,6 +10,8 @@ Fuzz targets for the parsers in `spectramesh-core`, run with
 | `key_text`   | Text to the `smk1-` and `smc1-` key parsers, checking round trips     |
 | `reassembly` | Fragment sequences to reassembly, checking its size and count limits  |
 | `router`     | A whole router, driven by a neighbor that holds the mesh key          |
+| `settings`   | Settings records, as firmware reads them from flash, with round trips |
+| `daemon`     | The daemon's parsers: options, control socket commands, web requests, key files, ICMPv6 errors, the Ethernet length prefix |
 
 Random bytes almost never carry a valid link tag, so the `router` target
 plays a mesh member: it passes the router's challenge, then turns its input

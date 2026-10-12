@@ -89,59 +89,57 @@ pub fn count_start(path: &Path) -> Option<u32> {
     Some(count)
 }
 
-/// Reads mesh keys from `path`, one per line. The first is the key frames
-/// are sent with; any others are accepted too. Blank lines and lines starting
-/// with `#` are ignored. Also returns the IPv6 prefix the first key implies.
-pub fn load_mesh_keys(path: &Path) -> io::Result<(KeyRing, [u8; 8])> {
+/// Parses a key file's text: one key per line, ignoring blank lines and
+/// lines starting with `#`. An error comes with its line number.
+pub fn parse_lines<T, E>(
+    text: &str,
+    parse: impl Fn(&str) -> Result<T, E>,
+) -> Result<Vec<T>, (usize, E)> {
+    text.lines()
+        .enumerate()
+        .map(|(number, line)| (number + 1, line.trim()))
+        .filter(|(_, line)| !line.is_empty() && !line.starts_with('#'))
+        .map(|(number, line)| parse(line).map_err(|err| (number, err)))
+        .collect()
+}
+
+/// Reads a key file with [`parse_lines`].
+pub fn read_key_file<T, E: std::fmt::Display>(
+    path: &Path,
+    parse: impl Fn(&str) -> Result<T, E>,
+) -> io::Result<Vec<T>> {
     let text = fs::read_to_string(path)
         .map_err(|err| io::Error::new(err.kind(), format!("{}: {err}", path.display())))?;
     warn_if_readable_by_others(path);
-    let mut ring: Option<(KeyRing, [u8; 8])> = None;
-    for (number, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let key = MeshKey::from_text(line).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{} line {}: {err}", path.display(), number + 1),
-            )
-        })?;
-        match &mut ring {
-            Some((ring, _)) => ring.accept(&key),
-            None => ring = Some((KeyRing::new(&key), key.ipv6_prefix())),
-        }
-    }
-    ring.ok_or_else(|| {
+    parse_lines(&text, parse).map_err(|(number, err)| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{} has no mesh keys", path.display()),
+            format!("{} line {number}: {err}", path.display()),
         )
     })
 }
 
-/// Reads channel keys from `path`, one per line, ignoring blank lines and
-/// lines starting with `#`.
-pub fn load_channel_keys(path: &Path) -> io::Result<Vec<ChannelKey>> {
-    let text = fs::read_to_string(path)
-        .map_err(|err| io::Error::new(err.kind(), format!("{}: {err}", path.display())))?;
-    warn_if_readable_by_others(path);
-    let mut keys = Vec::new();
-    for (number, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let key = ChannelKey::from_text(line).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{} line {}: {err}", path.display(), number + 1),
-            )
-        })?;
-        keys.push(key);
+/// Reads mesh keys from `path`, one per line. The first is the key frames
+/// are sent with; any others are accepted too. Also returns the IPv6 prefix
+/// the first key implies.
+pub fn load_mesh_keys(path: &Path) -> io::Result<(KeyRing, [u8; 8])> {
+    let keys = read_key_file(path, MeshKey::from_text)?;
+    let (first, others) = keys.split_first().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} has no mesh keys", path.display()),
+        )
+    })?;
+    let mut ring = KeyRing::new(first);
+    for key in others {
+        ring.accept(key);
     }
-    Ok(keys)
+    Ok((ring, first.ipv6_prefix()))
+}
+
+/// Reads channel keys from `path`, one per line.
+pub fn load_channel_keys(path: &Path) -> io::Result<Vec<ChannelKey>> {
+    read_key_file(path, ChannelKey::from_text)
 }
 
 fn warn_if_readable_by_others(path: &Path) {

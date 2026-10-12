@@ -235,6 +235,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "log"
+version = "0.4.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+
+[[package]]
 name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -349,6 +355,16 @@ name = "spectramesh-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "spectramesh-core",
+ "spectramesh-wrt",
+]
+
+[[package]]
+name = "spectramesh-wrt"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
  "spectramesh-core",
 ]
 

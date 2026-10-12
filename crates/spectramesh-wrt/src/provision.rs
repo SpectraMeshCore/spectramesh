@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use spectramesh_core::{ChannelKey, MeshKey};
 
+use crate::keys::read_key_file;
 use crate::modem;
 
 /// What to give the node. `None` leaves that setting as it is.
@@ -28,17 +29,15 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(5);
 pub fn run(port: &str, provision: &Provision<'_>) -> io::Result<()> {
     let mut commands = Vec::new();
     if let Some(file) = provision.mesh_key_file {
-        let keys = key_texts(file, |text| {
-            MeshKey::from_text(text).map(|key| key.to_text())
-        })?;
+        let keys = read_key_file(file, |text| MeshKey::from_text(text).map(|k| k.to_text()))?;
         commands.push(format!("mesh-keys {}", keys.join(" ")));
     }
     if let Some(name) = provision.name {
         commands.push(format!("name {name}"));
     }
     if let Some(file) = provision.channel_key_file {
-        let keys = key_texts(file, |text| {
-            ChannelKey::from_text(text).map(|key| key.to_text())
+        let keys = read_key_file(file, |text| {
+            ChannelKey::from_text(text).map(|k| k.to_text())
         })?;
         commands.push(format!("channel-keys {}", keys.join(" ")));
     }
@@ -73,29 +72,6 @@ pub fn run(port: &str, provision: &Provision<'_>) -> io::Result<()> {
     console.command("restart")?;
     println!("  restarting; it rejoins the mesh in a few seconds");
     Ok(())
-}
-
-/// Reads keys from a file, one per line, skipping blank lines and lines
-/// starting with `#`, and returns each in its canonical text form.
-fn key_texts<E: std::fmt::Display>(
-    file: &Path,
-    parse: impl Fn(&str) -> Result<String, E>,
-) -> io::Result<Vec<String>> {
-    let text = std::fs::read_to_string(file)
-        .map_err(|err| io::Error::new(err.kind(), format!("{}: {err}", file.display())))?;
-    text.lines()
-        .enumerate()
-        .map(|(number, line)| (number, line.trim()))
-        .filter(|(_, line)| !line.is_empty() && !line.starts_with('#'))
-        .map(|(number, line)| {
-            parse(line).map_err(|err| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{} line {}: {err}", file.display(), number + 1),
-                )
-            })
-        })
-        .collect()
 }
 
 struct Console {

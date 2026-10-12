@@ -48,17 +48,15 @@ fn answer(stream: TcpStream, snapshot: &Snapshot) -> io::Result<()> {
         line.clear();
     }
 
-    let mut parts = request.split_whitespace();
-    let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-    let (status, kind, body) = match (method, path) {
-        ("GET", "/") => ("200 OK", "text/html; charset=utf-8", PAGE.to_string()),
-        ("GET", "/api/mesh") => (
+    let (status, kind, body) = match route(&request) {
+        Page::Map => ("200 OK", "text/html; charset=utf-8", PAGE.to_string()),
+        Page::Mesh => (
             "200 OK",
             "application/json",
             snapshot.lock().expect("no panics while holding it").clone(),
         ),
-        ("GET", _) => ("404 Not Found", "text/plain", "not found\n".to_string()),
-        _ => (
+        Page::NotFound => ("404 Not Found", "text/plain", "not found\n".to_string()),
+        Page::WrongMethod => (
             "405 Method Not Allowed",
             "text/plain",
             "GET only\n".to_string(),
@@ -74,6 +72,26 @@ fn answer(stream: TcpStream, snapshot: &Snapshot) -> io::Result<()> {
         body.len()
     )?;
     stream.write_all(body.as_bytes())
+}
+
+/// What a request asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Page {
+    Map,
+    Mesh,
+    NotFound,
+    WrongMethod,
+}
+
+/// Reads a request line, such as `GET /api/mesh HTTP/1.1`.
+pub fn route(request_line: &str) -> Page {
+    let mut parts = request_line.split_whitespace();
+    match (parts.next().unwrap_or(""), parts.next().unwrap_or("")) {
+        ("GET", "/") => Page::Map,
+        ("GET", "/api/mesh") => Page::Mesh,
+        ("GET", _) => Page::NotFound,
+        _ => Page::WrongMethod,
+    }
 }
 
 /// A JSON description of the mesh as this node sees it. `hue_names` names
@@ -167,7 +185,7 @@ fn reset_name(cause: ResetCause) -> &'static str {
 
 /// `text` as a JSON string. Node names come from other nodes, so everything
 /// that could break out of the string is escaped.
-fn quoted(text: &str) -> String {
+pub fn quoted(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
     for c in text.chars() {

@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4.13"
 spectramesh-core = { path = "../crates/spectramesh-core" }
+spectramesh-wrt = { path = "../crates/spectramesh-wrt" }
 
 # Kept out of the main workspace: fuzzing needs nightly Rust and its own build flags.
 [workspace]
@@ -46,6 +47,20 @@ bench = false
 [[bin]]
 name = "reassembly"
 path = "fuzz_targets/reassembly.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "daemon"
+path = "fuzz_targets/daemon.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "settings"
+path = "fuzz_targets/settings.rs"
 test = false
 doc = false
 bench = false

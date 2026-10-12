@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [frame, router, modem, key_text, reassembly]
+        target: [frame, router, modem, key_text, reassembly, settings, daemon]
     defaults:
       run:
         working-directory: fuzz
