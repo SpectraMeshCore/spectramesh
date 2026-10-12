@@ -10,17 +10,21 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
+use esp_hal::Async;
 use esp_hal::clock::CpuClock;
 #[cfg(feature = "xiao-esp32c6")]
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
+use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx};
 use esp_radio::esp_now::{EspNowReceiver, EspNowSender};
 use esp_radio::wifi::WifiController;
-use log::{error, info};
-use spectramesh_core::{Config, HueId, KeyRing, MeshKey, Router};
+use log::{info, warn};
+use spectramesh_core::{Config, HueId, KeyRing, Router};
+use spectramesh_esp::console::{self, Context};
 use spectramesh_esp::mesh::{self, Outbox};
-use spectramesh_esp::{espnow, identity_store};
+use spectramesh_esp::storage::Store;
+use spectramesh_esp::{espnow, reset};
 
 extern crate alloc;
 
@@ -28,20 +32,6 @@ use alloc::boxed::Box;
 
 // The app descriptor the ESP-IDF bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
-
-/// The mesh key, set when building. Every node in the mesh needs the same one:
-///
-/// ```text
-/// SPECTRAMESH_MESH_KEY=smk1-... cargo run --release
-/// ```
-//
-// TODO: provision the key over the serial console and keep it in flash, so
-// one firmware image works for every mesh.
-const MESH_KEY: Option<&str> = option_env!("SPECTRAMESH_MESH_KEY");
-
-/// This node's name on the mesh map, set when building:
-/// `SPECTRAMESH_NAME=roof cargo run --release`. Optional.
-const NAME: Option<&str> = option_env!("SPECTRAMESH_NAME");
 
 /// Transmit power in quarter dBm: 80 is 20 dBm.
 const TX_POWER_QUARTER_DBM: i8 = 80;
@@ -57,6 +47,11 @@ static OUTBOXES: [(HueId, &Outbox); 1] = [(ESPNOW_HUE, &ESPNOW_OUTBOX)];
 #[embassy_executor::task]
 async fn mesh_task(router: Box<Router>) -> ! {
     mesh::run(router, &OUTBOXES).await
+}
+
+#[embassy_executor::task]
+async fn console_task(rx: UsbSerialJtagRx<'static, Async>, store: Store, context: Context) -> ! {
+    console::run(rx, store, context).await
 }
 
 #[embassy_executor::task]
@@ -76,6 +71,7 @@ async fn espnow_send_task(sender: EspNowSender) -> ! {
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
+    let reset_cause = reset::cause();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -95,18 +91,6 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-    let mesh_key = match MESH_KEY.map(MeshKey::from_text) {
-        Some(Ok(key)) => key,
-        Some(Err(err)) => halt(format_args!("SPECTRAMESH_MESH_KEY is invalid: {err}")).await,
-        None => {
-            halt(format_args!(
-                "built without a mesh key; rebuild with SPECTRAMESH_MESH_KEY set \
-                 (make one with `spectrameshd --generate-mesh-key`)"
-            ))
-            .await
-        }
-    };
-
     let mut wifi =
         WifiController::new(peripherals.WIFI, Default::default()).expect("failed to start Wi-Fi");
     // esp-radio starts the radio at 5 dBm. Mesh links need range, so use
@@ -119,10 +103,36 @@ async fn main(spawner: Spawner) -> ! {
     // Timed, as a measure of the elliptic-curve work on this chip: deriving
     // both public keys, and below, the router's first Ed25519 signature.
     let started = embassy_time::Instant::now();
-    let identity = identity_store::load_or_create(peripherals.FLASH, &rng)
+    let mut store = Store::new(peripherals.FLASH);
+    let identity = store
+        .load_or_create_identity(&rng)
         .expect("failed to read or store this node's identity in flash");
     let identity_ms = started.elapsed().as_millis();
     let id = identity.node_id();
+    let boots = store
+        .count_boot()
+        .inspect_err(|err| warn!("couldn't count this boot: {err:?}"))
+        .ok();
+    info!(
+        "node {id}, boot {}, last start: {reset_cause:?}",
+        boots.unwrap_or(0)
+    );
+    let mut settings = store.load_settings();
+
+    // The console runs whether or not there's a mesh key: it's how one is set.
+    let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE)
+        .into_async()
+        .split();
+    let routing = !settings.mesh_keys.is_empty();
+    let context = Context { node: id, routing };
+    spawner.spawn(console_task(usb_rx, store, context).expect("task already running"));
+    let Some(mesh_key) = settings.mesh_keys.first() else {
+        halt(format_args!(
+            "node {id} has no mesh key; give it one over USB with \
+             `spectrameshd --provision PORT --mesh-key-file FILE`"
+        ))
+        .await
+    };
     let mut seed = [0u8; 32];
     rng.read(&mut seed);
 
@@ -133,15 +143,24 @@ async fn main(spawner: Spawner) -> ! {
     let (_manager, sender, receiver) = esp_now.split();
 
     let started = embassy_time::Instant::now();
-    let mut router = Router::new(identity, KeyRing::new(&mesh_key), Config::default(), seed);
+    let mut keys = KeyRing::new(mesh_key);
+    for key in &settings.mesh_keys[1..] {
+        keys.accept(key);
+    }
+    let mut router = Router::new(identity, keys, Config::default(), seed);
     let router_ms = started.elapsed().as_millis();
     info!(
         "startup: identity {identity_ms} ms (flash and key derivation), router {router_ms} ms (signing)"
     );
     router.add_hue(espnow::hue_info(ESPNOW_HUE));
-    if let Some(name) = NAME {
-        router.set_name(name);
+    router.set_name(&settings.name);
+    router.set_boot_info(boots, reset_cause);
+    for key in settings.channel_keys.drain(..) {
+        info!("joined channel {}", key.id());
+        router.join_channel(key);
     }
+    // The keys are in the router now; drop the copies.
+    drop(settings);
 
     spawner.spawn(espnow_receive_task(receiver).expect("task already running"));
     spawner.spawn(espnow_send_task(sender).expect("task already running"));
@@ -155,10 +174,11 @@ async fn main(spawner: Spawner) -> ! {
     }
 }
 
-/// Logs why the node can't start, then waits forever.
+/// Logs why the node can't start, every so often, while the console waits
+/// for whatever it needs.
 async fn halt(reason: core::fmt::Arguments<'_>) -> ! {
     loop {
-        error!("{reason}");
+        warn!("{reason}");
         Timer::after(Duration::from_secs(10)).await;
     }
 }

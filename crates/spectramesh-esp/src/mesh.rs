@@ -7,12 +7,16 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either3, select3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
+use esp_println::println;
 use log::{debug, info, warn};
-use spectramesh_core::{Error, HueId, Instant, Router, Transmit};
+use spectramesh_core::app::{self, Payload};
+use spectramesh_core::{Delivery, Error, HueId, Instant, Router, Transmit};
+
+use crate::console::{self, Request};
 
 /// A frame a hue received.
 pub struct Received {
@@ -42,9 +46,24 @@ pub fn now() -> Instant {
 pub async fn run(mut router: Box<Router>, outboxes: &'static [(HueId, &'static Outbox)]) -> ! {
     let mut next_report = embassy_time::Instant::now() + REPORT_INTERVAL;
     loop {
-        // Wake for the router's timers, a received frame, or the next report.
+        // Wake for the router's timers, a received frame, a console
+        // command, or the next report.
         let wakeup = to_embassy(router.next_wakeup()).min(next_report);
-        if let Either::First(received) = select(INBOX.receive(), Timer::at(wakeup)).await {
+        let event = select3(
+            INBOX.receive(),
+            console::REQUESTS.receive(),
+            Timer::at(wakeup),
+        )
+        .await;
+        let received = match event {
+            Either3::First(received) => Some(received),
+            Either3::Second(request) => {
+                answer(&mut router, request);
+                None
+            }
+            Either3::Third(()) => None,
+        };
+        if let Some(received) = received {
             match router.handle_frame(received.hue, &received.frame, now()) {
                 Ok(Some(sender)) => {
                     // Only frames the router accepted count towards signal strength.
@@ -73,14 +92,94 @@ pub async fn run(mut router: Box<Router>, outboxes: &'static [(HueId, &'static O
                 warn!("send queue full; dropped a frame");
             }
         }
-        // TODO: hand deliveries to an application task instead of logging them.
         while let Some(delivery) = router.poll_delivery() {
-            info!("{} bytes from {}", delivery.payload.len(), delivery.src);
+            deliver(&delivery);
         }
 
         if embassy_time::Instant::now() >= next_report {
             next_report += REPORT_INTERVAL;
             report(&router);
+        }
+    }
+}
+
+/// Prints messages for programs on the console, as `spectrameshd --listen`
+/// does: `message FROM CHANNEL: TEXT`, with CHANNEL `direct` for messages to
+/// this node alone.
+//
+// TODO: hand them to an application task too.
+fn deliver(delivery: &Delivery) {
+    let (channel, data) = match (delivery.channel, delivery.sender_keys.is_some()) {
+        (Some(channel), _) => (alloc::format!("{channel}"), &delivery.payload[..]),
+        (None, true) => match Payload::classify(&delivery.payload) {
+            Payload::Message(data) => ("direct".into(), data),
+            _ => {
+                debug!(
+                    "dropped {} bytes from {}",
+                    delivery.payload.len(),
+                    delivery.src
+                );
+                return;
+            }
+        },
+        (None, false) => {
+            info!(
+                "{} bytes from neighbor {}",
+                delivery.payload.len(),
+                delivery.src
+            );
+            return;
+        }
+    };
+    let text: alloc::string::String = alloc::string::String::from_utf8_lossy(data)
+        .chars()
+        .flat_map(char::escape_debug)
+        .collect();
+    println!("message {} {channel}: {text}", delivery.src);
+}
+
+/// Carries out a console command that needs the router.
+fn answer(router: &mut Router, request: Request) {
+    match request {
+        Request::Info => {
+            let status = router.status(now());
+            println!(
+                "ok node {} {:?}, up {} s, boot {}, last start {:?}, {} neighbor links, {} routes",
+                router.id(),
+                router.name(),
+                status.uptime.as_secs(),
+                status.boots.unwrap_or(0),
+                status.reset,
+                router.neighbors().len(),
+                router.routes().count()
+            );
+            for id in router.channels() {
+                println!("  channel {id}");
+            }
+            for route in router.routes() {
+                println!(
+                    "  route to {} via {} on hue {}, cost {} us",
+                    route.dest, route.next_hop, route.hue.0, route.metric
+                );
+            }
+        }
+        Request::Send { node, text } => match router.send(node, &app::message(&text), now()) {
+            Ok(()) => println!("ok"),
+            Err(err) => println!("error {err}"),
+        },
+        Request::Channel { prefix, text } => {
+            let matches: alloc::vec::Vec<_> = router
+                .channels()
+                .filter(|id| alloc::format!("{id}").starts_with(&prefix))
+                .collect();
+            match matches[..] {
+                [id] => match router.send_to_channel(id, &text, now()) {
+                    Ok(()) => println!("ok"),
+                    Err(err) => println!("error {err}"),
+                },
+                [] => println!("error not a member of a channel {prefix}"),
+                _ => println!("error {prefix} matches more than one channel"),
+            }
         }
     }
 }

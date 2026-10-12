@@ -26,6 +26,8 @@ Usage: spectrameshd [OPTIONS] --mesh-key-file FILE --hue DEVICE[,SETTING=VALUE..
        spectrameshd [--control PATH] --send-channel CHANNEL MESSAGE
        spectrameshd [--control PATH] --listen
        spectrameshd [--control PATH] --channels
+       spectrameshd --provision PORT [--mesh-key-file FILE] [--name NAME]
+                    [--channel-key-file FILE]
 
 Routes SpectraMesh traffic across the given network devices.
 
@@ -67,6 +69,9 @@ Options:
   --listen                Print messages the running daemon receives
   --channels              Print the IDs of the channels the running daemon
                           has joined
+  --provision PORT        Give the ESP32 node on serial port PORT the mesh
+                          keys, name and channel keys given with the other
+                          options, then restart it, and exit
   -h, --help              Show this help
 
 Example:
@@ -93,6 +98,13 @@ pub enum Command {
     /// Prints messages the running daemon receives.
     Listen {
         control: Option<PathBuf>,
+    },
+    /// Gives an ESP32 node its settings over USB.
+    Provision {
+        port: String,
+        mesh_key_file: Option<PathBuf>,
+        name: Option<String>,
+        channel_key_file: Option<PathBuf>,
     },
     /// Prints the channels the running daemon has joined.
     Channels {
@@ -154,6 +166,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     let mut send = None;
     let mut listen = false;
     let mut list_channels = false;
+    let mut provision = None;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -202,6 +215,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
             }
             "--listen" => listen = true,
             "--channels" => list_channels = true,
+            "--provision" => provision = Some(value("--provision")?),
             "-v" | "--verbose" => verbose = true,
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -217,6 +231,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
             identity_file,
             mesh_key_file,
             ipv6_prefix,
+        });
+    }
+    if let Some(port) = provision {
+        return Ok(Command::Provision {
+            port,
+            mesh_key_file,
+            name,
+            channel_key_file,
         });
     }
     if let Some((to, message)) = send {

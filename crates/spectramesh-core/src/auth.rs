@@ -30,7 +30,7 @@ pub const TAG_LEN: usize = 8;
 ///
 /// As text, it's `smk1-` followed by 55 base32 characters: the key and a
 /// 2-byte checksum, so typos are caught instead of producing a different key.
-pub struct MeshKey([u8; 32]);
+pub struct MeshKey(pub(crate) [u8; 32]);
 
 const MESH_KEY_PREFIX: &str = "smk1-";
 const MESH_KEY_CHECKSUM: &str = "SpectraMesh mesh key checksum v1";

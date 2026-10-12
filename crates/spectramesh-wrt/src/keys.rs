@@ -70,6 +70,25 @@ pub fn load_or_create_identity(path: &Path) -> io::Result<Identity> {
     }
 }
 
+/// Counts this start of the daemon in `path`, which holds the count as
+/// decimal text, and returns the new count. `None` if the file can't be
+/// read or written, as on a read-only filesystem; the count is a
+/// convenience for the mesh map.
+pub fn count_start(path: &Path) -> Option<u32> {
+    let previous = match fs::read_to_string(path) {
+        Ok(text) => text.trim().parse::<u32>().ok()?,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
+        Err(_) => return None,
+    };
+    let count = previous.saturating_add(1);
+    // Written whole to a new file, then moved over the old one, so a crash
+    // can't leave it half written.
+    let new = path.with_extension("new");
+    fs::write(&new, format!("{count}\n")).ok()?;
+    fs::rename(&new, path).ok()?;
+    Some(count)
+}
+
 /// Reads mesh keys from `path`, one per line. The first is the key frames
 /// are sent with; any others are accepted too. Blank lines and lines starting
 /// with `#` are ignored. Also returns the IPv6 prefix the first key implies.

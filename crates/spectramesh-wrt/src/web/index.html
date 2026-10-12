@@ -171,7 +171,7 @@
     <section class="card" id="details" aria-live="polite"></section>
     <section class="card">
       <h2>Nodes</h2>
-      <div class="scroll"><table id="nodes"><thead><tr><th>Name</th><th class="num">Links</th><th class="num">Report</th></tr></thead><tbody></tbody></table></div>
+      <div class="scroll"><table id="nodes"><thead><tr><th>Name</th><th class="num">Links</th><th class="num">Up</th><th class="num">Report</th></tr></thead><tbody></tbody></table></div>
     </section>
     <section class="card">
       <h2>Routes from this node</h2>
@@ -222,6 +222,26 @@ function linkLabel(link) {
   const kind = KINDS[link.kind] || link.kind;
   const freq = link.freq_mhz ? ` ${link.freq_mhz >= 1000 ? (link.freq_mhz / 1000).toFixed(1) + " GHz" : link.freq_mhz + " MHz"}` : "";
   return kind + freq;
+}
+
+const RESETS = {
+  "power-on": "power on",
+  "restart": "restarted on purpose",
+  "panic": "crashed",
+  "watchdog": "watchdog: it hung",
+  "brownout": "brownout: power dipped",
+  "external": "reset pin or USB",
+  "wake": "woke from sleep",
+};
+
+/** How long a node has been up, now: its report's figure plus the report's age. */
+function uptime(report) {
+  if (!report || report.uptime_s === null) return null;
+  const s = report.uptime_s + report.age_s;
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min`;
+  return `${Math.floor(s / 86400)} d ${Math.floor(s % 86400 / 3600)} h`;
 }
 
 function cost(us) {
@@ -296,7 +316,9 @@ function render() {
     const state = layout.get(id);
     const report = mesh.nodes.find(n => n.id === id);
     state.text.textContent = label(id);
-    state.title.textContent = `${label(id)}\n${id}` + (report ? `\nreported ${report.age_s} s ago` : "\nno report yet");
+    state.title.textContent = `${label(id)}\n${id}` +
+      (report ? `\nreported ${report.age_s} s ago` : "\nno report yet") +
+      (uptime(report) ? `\nup ${uptime(report)}` : "");
     state.g.classList.toggle("self", id === mesh.self);
     state.g.classList.toggle("stale", !report);
   }
@@ -353,7 +375,8 @@ function renderTables() {
     idLine.className = "id";
     idLine.textContent = id;
     name.append(idLine);
-    row.append(name, cell(report ? report.links.length : "–", true), cell(report ? `${report.age_s} s` : "none", true));
+    row.append(name, cell(report ? report.links.length : "–", true), cell(uptime(report) || "–", true),
+      cell(report ? `${report.age_s} s` : "none", true));
     return row;
   }));
 
@@ -427,6 +450,9 @@ function applySelection() {
   if (route) add("Route", `via ${route.next_hop === route.dest ? "direct link" : label(route.next_hop)} on ${route.hue}, ${cost(route.cost)}`);
   if (report) {
     add("Report", `${report.age_s} s ago`);
+    if (uptime(report)) add("Up", uptime(report));
+    if (report.boots !== null) add("Started", `${report.boots} time${report.boots === 1 ? "" : "s"}`);
+    if (report.reset && report.reset !== "unknown") add("Last start", RESETS[report.reset] || report.reset);
     for (const link of report.links) {
       const heard = link.rssi === null ? "" : `, heard at ${signal(link.rssi)}`;
       add(label(link.to), `${linkLabel(link)}, ${cost(link.cost)}${heard}`);

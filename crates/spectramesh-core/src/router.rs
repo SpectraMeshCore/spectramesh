@@ -35,7 +35,7 @@ use crate::packet::{
     Body, DATA_HEADER_LEN, DATA_OVERHEAD, DataHeader, Frame, FrameKind, HEADER_LEN, Header, Tlv,
     Trailer,
 };
-use crate::report::NodeReport;
+use crate::report::{NodeReport, ResetCause};
 use crate::routing::{self, INFINITY, Route, RouteEntry, RouteTable, SourceTable, seqno_newer};
 use crate::session::{Initiation, Session, TRANSPORT_OVERHEAD};
 use crate::time::Instant;
@@ -190,6 +190,9 @@ pub struct Router {
     /// The latest neighbor report from each node, this one included.
     reports: BTreeMap<NodeId, NodeReport>,
     next_report: Instant,
+    /// How many times this node has started, and why it last did, for reports.
+    boots: Option<u32>,
+    reset_cause: ResetCause,
 }
 
 impl Router {
@@ -244,6 +247,8 @@ impl Router {
             reports: BTreeMap::new(),
             // Give links a little time to form before the first report.
             next_report: Instant::from_millis(10_000),
+            boots: None,
+            reset_cause: ResetCause::Unknown,
         }
     }
 

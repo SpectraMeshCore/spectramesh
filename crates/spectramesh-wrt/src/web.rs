@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use log::{info, warn};
-use spectramesh_core::{Instant, LinkKind, NodeId, Router};
+use spectramesh_core::{Instant, LinkKind, NodeId, ResetCause, Router};
 
 const PAGE: &str = include_str!("web/index.html");
 
@@ -92,9 +92,19 @@ pub fn snapshot_json(router: &Router, hue_names: &[(u8, String)], now: Instant) 
             json.push(',');
         }
         let age = now.saturating_duration_since(report.received).as_secs();
+        // Uptime and the rest as of the report, so add its age for now.
+        let (uptime, boots, reset) = match report.status {
+            Some(status) => (
+                status.uptime.as_secs().to_string(),
+                status.boots.map_or("null".to_string(), |n| n.to_string()),
+                quoted(reset_name(status.reset)),
+            ),
+            None => ("null".into(), "null".into(), "null".into()),
+        };
         let _ = write!(
             json,
-            "{{\"id\":{},\"name\":{},\"age_s\":{age},\"links\":[",
+            "{{\"id\":{},\"name\":{},\"age_s\":{age},\"uptime_s\":{uptime},\
+             \"boots\":{boots},\"reset\":{reset},\"links\":[",
             id(report.node),
             quoted(&report.name)
         );
@@ -140,6 +150,19 @@ pub fn snapshot_json(router: &Router, hue_names: &[(u8, String)], now: Instant) 
     }
     json.push_str("]}");
     json
+}
+
+fn reset_name(cause: ResetCause) -> &'static str {
+    match cause {
+        ResetCause::Unknown => "unknown",
+        ResetCause::PowerOn => "power-on",
+        ResetCause::Restart => "restart",
+        ResetCause::Panic => "panic",
+        ResetCause::Watchdog => "watchdog",
+        ResetCause::Brownout => "brownout",
+        ResetCause::External => "external",
+        ResetCause::Wake => "wake",
+    }
 }
 
 /// `text` as a JSON string. Node names come from other nodes, so everything

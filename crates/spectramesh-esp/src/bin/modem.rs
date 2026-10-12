@@ -37,6 +37,8 @@ use esp_radio::wifi::{Interface, WifiController};
 use spectramesh_core::modem::{
     FromModem, ModemInfo, PROTOCOL_VERSION, SlipDecoder, ToModem, slip_encode,
 };
+// Linked for its panic handling: restart rather than hang.
+use spectramesh_esp as _;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 

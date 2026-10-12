@@ -18,15 +18,48 @@ You need [`espflash`](https://github.com/esp-rs/espflash) once:
 cargo install espflash --locked
 ```
 
-Every node in a mesh needs the same mesh key, which is built into the firmware for now. Make one with `spectrameshd --generate-mesh-key` (from [`spectramesh-wrt`](../spectramesh-wrt)), keep it somewhere safe, then, from this directory, with a board plugged in over USB:
+From this directory, with a board plugged in over USB:
 
 ```
-SPECTRAMESH_MESH_KEY=smk1-... cargo run --release
-# or, on a XIAO ESP32-C6, with the key kept in a file:
-SPECTRAMESH_MESH_KEY=$(cat ~/.config/spectramesh/mesh.key) cargo run --release --features xiao-esp32c6
+cargo run --release                          # any ESP32-C6 board
+cargo run --release --features xiao-esp32c6  # a Seeed XIAO ESP32-C6
 ```
 
-Add `SPECTRAMESH_NAME=...` to name the node on the mesh map. That builds, flashes and opens the serial monitor. If the log stops at `waiting for download`, the chip is still in its bootloader (for example after starting it in BOOT mode): press RESET, or run `espflash reset --after watchdog-reset`. Firmware built without a key logs an error and doesn't start. Treat built firmware images like the key itself. `rust-toolchain.toml` makes rustup add the RISC-V target and Rust's source code on the first build.
+That builds, flashes (with the partition table in `partitions.csv`) and opens the serial monitor. If the log stops at `waiting for download`, the chip is still in its bootloader (for example after starting it in BOOT mode): press RESET, or run `espflash reset --after watchdog-reset`. `rust-toolchain.toml` makes rustup add the RISC-V target and Rust's source code on the first build.
+
+CI builds images too (the `firmware` artifact of each run). Flash one with `espflash flash --chip esp32c6 --partition-table partitions.csv spectramesh-esp-xiao-esp32c6`.
+
+The firmware holds no keys, so one image works for every mesh. A new board starts without a mesh key and waits for one. Give it the mesh's keys, a name and any channels over USB with `spectrameshd` from [`spectramesh-wrt`](../spectramesh-wrt), using the same files as the daemon (make a mesh key with `spectrameshd --generate-mesh-key`):
+
+```
+spectrameshd --provision /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_<MAC>-if00 \
+    --mesh-key-file ~/.config/spectramesh/mesh.key --name roof \
+    [--channel-key-file ~/.config/spectramesh/channels.key]
+```
+
+```
+/dev/serial/by-id/...: node !d1c6f35920e92ec6
+  set mesh-keys
+  set name
+  restarting; it rejoins the mesh in a few seconds
+```
+
+The board keeps them in flash, through reflashing, and restarts to apply them. Run it again to change any of them; settings you leave out stay as they were.
+
+### The serial console
+
+`--provision` drives a console on the board's USB serial port, which you can also use by hand from `espflash monitor` or any serial terminal. Each command is answered with a line starting `ok` or `error`, between log messages:
+
+| Command | Effect |
+|---|---|
+| `info` | Node ID, name, uptime, boot count, neighbors, channels and routes |
+| `send NODE TEXT` | Sends a message to one node, encrypted end to end |
+| `channel CHANNEL TEXT` | Sends a message on a joined channel (the start of its ID is enough) |
+| `mesh-keys KEY...`, `name [NAME]`, `channel-keys [KEY...]` | Saves settings, applied at the next restart. Keys are never printed back |
+| `erase-settings` | Forgets the keys, name and channels, keeping the node's identity |
+| `restart` | Restarts the board |
+
+Messages for the node appear as `message FROM CHANNEL: TEXT` (`direct` for messages to this node alone), as `spectrameshd --listen` prints them.
 
 This crate is excluded from the root workspace because it builds for the board, not your computer. Run cargo commands from this directory.
 
@@ -36,8 +69,9 @@ On boot, each board:
 
 1. Starts Wi-Fi and ESP-NOW on channel 1 (`ESPNOW_CHANNEL` in `src/bin/main.rs`). All boards must use the same channel.
 2. Loads its secret from flash, or on first boot creates one with the hardware random number generator and stores it. Its node ID comes from that secret, so it survives reflashing the firmware (but not erasing the whole flash).
-3. Runs the router, which sends hellos, measures links and builds routes.
-4. Logs its neighbors and routes every 30 seconds:
+3. Counts the boot and notes why it started (power on, restart, crash, watchdog, brownout), and loads its settings. Without a mesh key, it waits for one on the console.
+4. Runs the router, which sends hellos, measures links and builds routes, and every minute reports its links, uptime, boot count and last start reason to the whole mesh, for the map.
+5. Logs its neighbors and routes every 30 seconds:
 
 ```
 INFO - SpectraMesh node !a1b2c3d4e5f60718 running on ESP-NOW channel 1
@@ -64,7 +98,9 @@ The protocol (SLIP-framed messages over the USB serial link) is in `spectramesh_
 |---|---|
 | `src/bin/main.rs` | Starts the hardware, registers hues and spawns tasks |
 | `src/mesh.rs` | The router task. It owns the `Router`, wakes on received frames and timers, and hands frames to each hue's send queue |
-| `src/identity_store.rs` | Keeps the node's secret in the first sector of the `nvs` flash partition, which this firmware doesn't otherwise use |
+| `src/storage.rs` | Keeps the node's identity, settings and boot count in the `spectramesh` flash partition |
+| `src/console.rs` | The serial console |
+| `src/reset.rs` | Restarts, including after a panic, and why the board last started |
 | `src/espnow.rs` | The ESP-NOW hue: a receive task and a send task |
 | `src/bin/modem.rs` | The USB radio modem firmware |
 
@@ -81,6 +117,20 @@ The Xtensa chips (the original ESP32 and the S3) need Espressif's toolchain from
 - **A sub-GHz hue**: an SX1262 driver over SPI for 915 MHz FSK and LoRa (Heltec WiFi LoRa 32 V3, LilyGO T-Beam)
 - **Unicast ESP-NOW** to the next hop, for link-layer acknowledgements and retries
 - **ESP-NOW v2**, raising the MTU from 250 to 1470 bytes
-- **An application interface**, so code on the board can send and receive mesh data (today, received data is only logged)
-- **Mesh keys provisioned over the serial console** and kept in flash, so one firmware image works for every mesh
-- **Flash encryption**, so someone holding a board can't read its secret or the mesh key out of flash
+- **An application interface**, so code on the board can send and receive mesh data (today, messages go to the console)
+- **Flash encryption on real boards**; see below
+
+## Protecting the keys on a board
+
+The node's secret and the mesh keys sit in the `spectramesh` partition. Anyone holding a board can read its flash over USB, so on its own the partition protects nothing. The ESP32-C6 can encrypt its flash with a key in its eFuses that software can't read, and the partition is already flagged `encrypted`. The firmware reads and writes it the same way either way, so nothing changes in the code when encryption is turned on.
+
+Turning it on takes **eFuse burns, which can never be undone**. Try it on a spare board first. The plan, not yet tried on hardware:
+
+1. Burn a flash encryption key made on the host: `espefuse.py --port PORT burn_key BLOCK_KEY0 key.bin XTS_AES_128_KEY`.
+2. Encrypt the bootloader, partition table and app with that key (`espsecure.py encrypt_flash_data --aes_xts`), and flash the encrypted images.
+3. Enable encryption by burning `SPI_BOOT_CRYPT_CNT`. In this **development mode**, boards can still be reflashed with images encrypted by the same key.
+4. For deployed nodes, use **release mode**: also disable encrypted writes from download mode (`DIS_DOWNLOAD_MANUAL_ENCRYPT`) and the USB JTAG interface (`DIS_USB_JTAG`), which could otherwise read memory while the firmware runs. Without them, someone with the board could load their own firmware or attach a debugger and read the keys anyway. Secure Boot v2 goes further, letting the board run only firmware you signed.
+
+Board identities are made on the board, so encrypting a board's flash for the first time also means giving it a new identity and provisioning it again.
+
+The USB console never prints a key, so having it doesn't help someone read them. It does let anyone who holds the board change its settings.

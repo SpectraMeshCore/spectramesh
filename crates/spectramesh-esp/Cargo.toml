@@ -32,7 +32,8 @@ esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio",
 esp-radio = { version = "1.0.0-beta.1", features = ["esp-alloc", "esp-now", "esp32c6", "log-04", "unstable", "wifi"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c6", "log-04"] }
 esp-alloc = { version = "0.11.0", features = ["esp32c6"] }
-esp-backtrace = { version = "0.20.0", features = ["esp32c6", "panic-handler", "println"] }
+# custom-halt: restart after a panic (see reset.rs) instead of hanging.
+esp-backtrace = { version = "0.20.0", features = ["custom-halt", "esp32c6", "panic-handler", "println"] }
 esp-println = { version = "0.18.0", features = ["esp32c6", "log-04"] }
 
 embassy-executor = { version = "0.10.0", features = ["log"] }

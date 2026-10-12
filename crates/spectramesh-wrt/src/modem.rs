@@ -38,14 +38,7 @@ pub struct ModemReader {
 impl Modem {
     /// Opens the modem at `path` and asks for its details.
     pub fn open(path: &str) -> io::Result<(Modem, ModemReader)> {
-        let port = OpenOptions::new()
-            .read(true)
-            .write(true)
-            // Non-blocking, or opening waits for a carrier signal USB serial
-            // ports may never raise. `make_raw` switches reads back to blocking.
-            .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK)
-            .open(path)?;
-        make_raw(&port)?;
+        let port = open_serial(path)?;
         let mut reader = ModemReader {
             port: port.try_clone()?,
             decoder: SlipDecoder::new(MAX_MESSAGE),
@@ -132,6 +125,20 @@ impl ModemReader {
             }
         }
     }
+}
+
+/// Opens a serial port in raw mode, with reads that wait at most a tenth of
+/// a second.
+pub fn open_serial(path: &str) -> io::Result<File> {
+    let port = OpenOptions::new()
+        .read(true)
+        .write(true)
+        // Non-blocking, or opening waits for a carrier signal USB serial
+        // ports may never raise. `make_raw` switches reads back to blocking.
+        .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)?;
+    make_raw(&port)?;
+    Ok(port)
 }
 
 /// Puts a serial port in raw mode: no echo, no line editing, no character

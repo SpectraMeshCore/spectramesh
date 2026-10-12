@@ -18,12 +18,18 @@
 //! | then 1     | Number of links                                 |
 //! | then 1     | Bytes per link, 16 in this version              |
 //! | then each  | Neighbor ID (8), link kind (1), frequency in MHz (2), cost in microseconds (4), signal strength in dBm (1, signed; -128 if not measured) |
+//! | then 1     | Bytes of node status that follow, 9 in this version |
+//! | then 4     | Uptime in seconds: how long the node's router has run |
+//! | then 4     | Boot count, 0 if the node doesn't count            |
+//! | then 1     | Why the node last started ([`ResetCause`])         |
 //!
 //! Receivers read the fields they know from each link and skip the rest, so
-//! later versions can add fields to the end of each link.
+//! later versions can add fields to the end of each link, and to the status.
+//! Reports from versions without the status end after the links.
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::time::Duration;
 
 use crate::error::{Error, Result};
 use crate::hue::HueKind;
@@ -99,6 +105,55 @@ impl LinkKind {
     }
 }
 
+/// Why a node last started, as far as it can tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResetCause {
+    Unknown,
+    /// Power was applied.
+    PowerOn,
+    /// Its software restarted it on purpose, such as after new settings.
+    Restart,
+    /// Its software crashed and restarted.
+    Panic,
+    /// A watchdog restarted it: something hung.
+    Watchdog,
+    /// Its supply voltage dropped too low.
+    Brownout,
+    /// Its reset pin or programming interface restarted it.
+    External,
+    /// It woke from deep sleep.
+    Wake,
+}
+
+impl ResetCause {
+    fn code(self) -> u8 {
+        self as u8
+    }
+
+    fn from_code(code: u8) -> Self {
+        use ResetCause::*;
+        [
+            Unknown, PowerOn, Restart, Panic, Watchdog, Brownout, External, Wake,
+        ]
+        .get(usize::from(code))
+        .copied()
+        .unwrap_or(Unknown)
+    }
+}
+
+/// How a node is doing, as of its report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NodeStatus {
+    /// How long the node's router had run when it sent the report.
+    pub uptime: Duration,
+    /// How many times the node has started, if it counts.
+    pub boots: Option<u32>,
+    pub reset: ResetCause,
+}
+
+/// Bytes of status this version writes.
+const STATUS_LEN: usize = 9;
+
 /// One link a node reported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReportedLink {
@@ -117,6 +172,8 @@ pub struct NodeReport {
     pub node: NodeId,
     pub name: String,
     pub links: Vec<ReportedLink>,
+    /// `None` from versions that don't report it.
+    pub status: Option<NodeStatus>,
     /// When this node received the report (or made it, for its own).
     pub received: Instant,
 }
@@ -131,7 +188,12 @@ pub(crate) fn clip_name(name: &str) -> &str {
 }
 
 /// Encodes a report's broadcast payload. Links past what fits are left out.
-pub(crate) fn encode(message_id: u32, name: &str, links: &[ReportedLink]) -> Vec<u8> {
+pub(crate) fn encode(
+    message_id: u32,
+    name: &str,
+    links: &[ReportedLink],
+    status: &NodeStatus,
+) -> Vec<u8> {
     let name = clip_name(name);
     let links = &links[..links.len().min(u8::MAX.into())];
     let mut payload = Vec::with_capacity(8 + name.len() + links.len() * LINK_LEN);
@@ -149,13 +211,26 @@ pub(crate) fn encode(message_id: u32, name: &str, links: &[ReportedLink]) -> Vec
         let rssi = link.rssi.map_or(NO_RSSI, |dbm| dbm.max(NO_RSSI + 1));
         payload.push(rssi as u8);
     }
+    payload.push(STATUS_LEN as u8);
+    let uptime = u32::try_from(status.uptime.as_secs()).unwrap_or(u32::MAX);
+    payload.extend_from_slice(&uptime.to_be_bytes());
+    payload.extend_from_slice(&status.boots.unwrap_or(0).to_be_bytes());
+    payload.push(status.reset.code());
     payload
 }
 
-/// Decodes a report from its payload after the kind byte. Returns the
-/// message ID, name and links. Links of kinds this version doesn't know
-/// are skipped.
-pub(crate) fn decode(body: &[u8]) -> Result<(u32, String, Vec<ReportedLink>)> {
+/// A report, decoded.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Decoded {
+    pub message_id: u32,
+    pub name: String,
+    pub links: Vec<ReportedLink>,
+    pub status: Option<NodeStatus>,
+}
+
+/// Decodes a report from its payload after the kind byte. Links of kinds
+/// this version doesn't know are skipped.
+pub(crate) fn decode(body: &[u8]) -> Result<Decoded> {
     let message_id = u32::from_be_bytes(body.get(..4).ok_or(Error::Truncated)?.try_into().unwrap());
     let name_len = usize::from(*body.get(4).ok_or(Error::Truncated)?);
     if name_len > MAX_NAME_LEN {
@@ -171,9 +246,26 @@ pub(crate) fn decode(body: &[u8]) -> Result<(u32, String, Vec<ReportedLink>)> {
     if link_len < MIN_LINK_LEN {
         return Err(Error::Malformed);
     }
-    let entries = entries
-        .get(..usize::from(*count) * link_len)
-        .ok_or(Error::Truncated)?;
+    let links_len = usize::from(*count) * link_len;
+    let (entries, after) = (
+        entries.get(..links_len).ok_or(Error::Truncated)?,
+        &entries[links_len..],
+    );
+    // Status, if the sender's version has it: a length, then the fields.
+    let status = match after.split_first() {
+        Some((&len, rest)) if usize::from(len) >= STATUS_LEN => {
+            let fields = rest.get(..STATUS_LEN).ok_or(Error::Truncated)?;
+            let boots = u32::from_be_bytes(fields[4..8].try_into().expect("4 bytes"));
+            Some(NodeStatus {
+                uptime: Duration::from_secs(
+                    u32::from_be_bytes(fields[..4].try_into().expect("4 bytes")).into(),
+                ),
+                boots: (boots != 0).then_some(boots),
+                reset: ResetCause::from_code(fields[8]),
+            })
+        }
+        _ => None,
+    };
     let links = entries
         .chunks_exact(link_len)
         .filter_map(|e| {
@@ -187,7 +279,12 @@ pub(crate) fn decode(body: &[u8]) -> Result<(u32, String, Vec<ReportedLink>)> {
             })
         })
         .collect();
-    Ok((message_id, name, links))
+    Ok(Decoded {
+        message_id,
+        name,
+        links,
+        status,
+    })
 }
 
 #[cfg(test)]
@@ -211,20 +308,48 @@ mod tests {
                 rssi: None,
             },
         ];
-        let payload = encode(77, "roof node", &links);
+        let status = NodeStatus {
+            uptime: Duration::from_secs(3_600),
+            boots: Some(12),
+            reset: ResetCause::Brownout,
+        };
+        let payload = encode(77, "roof node", &links, &status);
         assert_eq!(payload[0], REPORT);
         assert_eq!(
             decode(&payload[1..]).unwrap(),
-            (77, String::from("roof node"), links)
+            Decoded {
+                message_id: 77,
+                name: String::from("roof node"),
+                links,
+                status: Some(status),
+            }
         );
+    }
+
+    const STATUS: NodeStatus = NodeStatus {
+        uptime: Duration::from_secs(1),
+        boots: None,
+        reset: ResetCause::Unknown,
+    };
+
+    #[test]
+    fn longer_status_from_newer_nodes_is_read() {
+        let mut payload = encode(5, "n", &[], &STATUS);
+        let at = payload.len() - STATUS_LEN - 1;
+        payload[at] = STATUS_LEN as u8 + 2;
+        payload.extend_from_slice(&[0xaa, 0xbb]);
+        assert_eq!(decode(&payload[1..]).unwrap().status, Some(STATUS));
+        // A status cut short is an error, not a guess.
+        payload.truncate(at + 4);
+        assert_eq!(decode(&payload[1..]), Err(Error::Truncated));
     }
 
     #[test]
     fn names_are_clipped_at_character_boundaries() {
         let long = "ü".repeat(20); // 40 bytes
         assert_eq!(clip_name(&long).len(), 32);
-        let payload = encode(1, &long, &[]);
-        assert_eq!(decode(&payload[1..]).unwrap().1, "ü".repeat(16));
+        let payload = encode(1, &long, &[], &STATUS);
+        assert_eq!(decode(&payload[1..]).unwrap().name, "ü".repeat(16));
     }
 
     #[test]
@@ -243,9 +368,11 @@ mod tests {
         let mut body = vec![0, 0, 0, 9, 0, 1, 18];
         body.extend_from_slice(&NodeId::from_u64(5).0);
         body.extend_from_slice(&[2, 0, 0, 0, 0, 3, 32, (-70i8) as u8, 0xaa, 0xbb]);
-        let (_, _, links) = decode(&body).unwrap();
+        let report = decode(&body).unwrap();
+        // Reports from versions before the status have none.
+        assert_eq!(report.status, None);
         assert_eq!(
-            links,
+            report.links,
             [ReportedLink {
                 neighbor: NodeId::from_u64(5),
                 kind: LinkKind::EspNow,

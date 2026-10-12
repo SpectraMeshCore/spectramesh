@@ -9,6 +9,7 @@ mod keys;
 mod link;
 mod logger;
 mod modem;
+mod provision;
 mod tun;
 mod web;
 
@@ -54,6 +55,19 @@ fn main() -> ExitCode {
             to,
             message,
         }) => return send(&control::path(control.as_deref()), to, &message),
+        Ok(Command::Provision {
+            port,
+            mesh_key_file,
+            name,
+            channel_key_file,
+        }) => {
+            let settings = provision::Provision {
+                mesh_key_file: mesh_key_file.as_deref(),
+                name: name.as_deref(),
+                channel_key_file: channel_key_file.as_deref(),
+            };
+            return client_result(provision::run(&port, &settings));
+        }
         Ok(Command::Channels { control }) => {
             let ids = control::request(&control::path(control.as_deref()), "channels");
             return client_result(ids.map(|ids| {
@@ -260,6 +274,10 @@ fn run(config: Config) -> io::Error {
     if let Some(name) = &config.name {
         router.set_name(name);
     }
+    // Counted beside the identity file (node.key: node.starts), as both
+    // belong to this node.
+    let starts = keys::count_start(&config.identity_file.with_extension("starts"));
+    router.set_boot_info(starts, spectramesh_core::ResetCause::Unknown);
     let snapshot = match config.web {
         Some(address) => {
             let snapshot = web::Snapshot::default();

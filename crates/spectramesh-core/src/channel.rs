@@ -86,7 +86,7 @@ impl fmt::Debug for ChannelId {
 ///
 /// As text, it's `smc1-` followed by 55 base32 characters, with a checksum,
 /// like a mesh key.
-pub struct ChannelKey([u8; 32]);
+pub struct ChannelKey(pub(crate) [u8; 32]);
 
 impl ChannelKey {
     /// Use 32 bytes from a cryptographic random number generator.

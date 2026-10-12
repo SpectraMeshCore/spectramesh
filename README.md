@@ -31,7 +31,8 @@ Every frame is authenticated with a shared mesh key, replays are rejected, node 
 ```
 cargo test                                         # core and daemon tests
 crates/spectramesh-wrt/scripts/veth-demo.sh        # daemons on virtual cables (after cargo build)
-SPECTRAMESH_MESH_KEY=smk1-... cargo run --release  # flash a board, from crates/spectramesh-esp
+cargo run --release                                # flash a board, from crates/spectramesh-esp
+spectrameshd --provision PORT --mesh-key-file FILE # then give it the mesh key
 ```
 
 ## License

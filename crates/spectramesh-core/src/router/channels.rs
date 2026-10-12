@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::fragment::MAX_DATAGRAM;
 use crate::node::NodeId;
 use crate::packet::{DATA_HEADER_LEN, DataHeader};
-use crate::report::{self, NodeReport, ReportedLink};
+use crate::report::{self, NodeReport, NodeStatus, ReportedLink, ResetCause};
 use crate::time::Instant;
 
 /// How long to remember a channel message, so copies arriving by other
@@ -115,9 +115,9 @@ impl Router {
                 }
             }
             report::REPORT => {
-                let (message_id, name, links) = report::decode(body)?;
+                let report = report::decode(body)?;
                 if header.origin == self.id
-                    || !self.remember_broadcast(header.origin, message_id, now)
+                    || !self.remember_broadcast(header.origin, report.message_id, now)
                 {
                     return Ok(());
                 }
@@ -132,8 +132,9 @@ impl Router {
                     header.origin,
                     NodeReport {
                         node: header.origin,
-                        name,
-                        links,
+                        name: report.name,
+                        links: report.links,
+                        status: report.status,
                         received: now,
                     },
                 );
@@ -150,6 +151,23 @@ impl Router {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Tells the router how many times this node has started, if the
+    /// platform counts, and why it last started, for its reports.
+    pub fn set_boot_info(&mut self, boots: Option<u32>, reset: ResetCause) {
+        self.boots = boots;
+        self.reset_cause = reset;
+    }
+
+    /// This node's status as of `now`. Uptime counts from the time the
+    /// platform's clock starts at, such as power-on.
+    pub fn status(&self, now: Instant) -> NodeStatus {
+        NodeStatus {
+            uptime: Duration::from_millis(now.as_millis()),
+            boots: self.boots,
+            reset: self.reset_cause,
+        }
     }
 
     /// The mesh as the neighbor reports describe it: the latest report from
@@ -181,8 +199,9 @@ impl Router {
                 })
             })
             .collect();
+        let status = self.status(now);
         let message_id = self.random.next_u32();
-        let payload = report::encode(message_id, &self.name, &links);
+        let payload = report::encode(message_id, &self.name, &links, &status);
         self.remember_broadcast(self.id, message_id, now);
         self.reports.insert(
             self.id,
@@ -190,6 +209,7 @@ impl Router {
                 node: self.id,
                 name: self.name.clone(),
                 links,
+                status: Some(status),
                 received: now,
             },
         );

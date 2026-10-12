@@ -49,6 +49,7 @@ pub mod report;
 pub mod router;
 pub mod routing;
 pub mod session;
+pub mod settings;
 pub mod time;
 
 pub use auth::{KeyRing, KeyTextError, MeshKey};
@@ -57,7 +58,7 @@ pub use error::{Error, Result};
 pub use hue::{HueId, HueInfo, HueKind};
 pub use identity::{Identity, PublicIdentity};
 pub use node::{NodeId, ParseIdError};
-pub use report::{LinkKind, NodeReport, ReportedLink};
+pub use report::{LinkKind, NodeReport, NodeStatus, ReportedLink, ResetCause};
 pub use router::{Config, Delivery, MAX_PAYLOAD, Router, Transmit};
 pub use routing::Route;
 pub use session::TRANSPORT_OVERHEAD;
