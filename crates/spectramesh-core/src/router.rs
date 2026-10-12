@@ -375,7 +375,7 @@ impl Router {
                     return Ok(Some(sender));
                 }
                 if header.dst.is_broadcast() {
-                    self.handle_broadcast(header, payload, now)?;
+                    self.handle_broadcast(sender, header, payload, now)?;
                 } else if header.dst == self.id {
                     self.handle_end_to_end(header.origin, payload, now)?;
                 } else {
@@ -1634,6 +1634,111 @@ mod tests {
         assert_eq!(
             routers[1].send_to_channel(id, b"not mine", now),
             Err(Error::UnknownChannel)
+        );
+    }
+
+    /// Runs the routers for `duration` and counts the data frames each sends.
+    fn count_data_frames(
+        routers: &mut [Router],
+        links: &[(usize, usize, HueId)],
+        from: Instant,
+        duration: Duration,
+    ) -> Vec<usize> {
+        let mut counts = alloc::vec![0; routers.len()];
+        let mut now = from;
+        while now < from + duration {
+            for i in 0..routers.len() {
+                routers[i].poll(now);
+                while let Some(tx) = routers[i].poll_transmit() {
+                    if Frame::decode(&tx.frame).unwrap().header.kind == FrameKind::Data {
+                        counts[i] += 1;
+                    }
+                    for &(a, b, hue) in links {
+                        let peer = match (a == i, b == i) {
+                            (true, _) => b,
+                            (_, true) => a,
+                            _ => continue,
+                        };
+                        if hue == tx.hue {
+                            let _ = routers[peer].handle_frame(hue, &tx.frame, now);
+                        }
+                    }
+                }
+            }
+            now = now + Duration::from_millis(100);
+        }
+        counts
+    }
+
+    #[test]
+    fn floods_are_relayed_only_where_the_sender_did_not_reach() {
+        // Four nodes that all hear each other: the sender reaches everyone,
+        // so nobody needs to relay.
+        let mut routers: Vec<Router> = (1..=4).map(|id| router(id, &[wifi()])).collect();
+        let links: Vec<_> = (0..4)
+            .flat_map(|a| (a + 1..4).map(move |b| (a, b, WIFI)))
+            .collect();
+        for router in routers.iter_mut() {
+            router.config.report_interval = Some(secs(10));
+        }
+        let now = simulate(&mut routers, &links, Instant::default(), secs(25));
+        // Every report is in; send no more, so only the message is flooded.
+        let key = || ChannelKey::from_bytes([0x77; 32]);
+        for router in routers.iter_mut() {
+            router.config.report_interval = None;
+            router.join_channel(key());
+        }
+        routers[0]
+            .send_to_channel(key().id(), b"everyone hears this", now)
+            .unwrap();
+        let sent = count_data_frames(&mut routers, &links, now, secs(2));
+        assert_eq!(sent, [1, 0, 0, 0]);
+        for member in 1..4 {
+            assert_eq!(
+                deliveries(&mut routers[member]),
+                [b"everyone hears this".to_vec()],
+                "member {member}"
+            );
+        }
+
+        // In a line, each node has a neighbor the previous one can't reach.
+        let (mut routers, links) = line(4);
+        for router in routers.iter_mut() {
+            router.config.report_interval = Some(secs(10));
+        }
+        let now = simulate(&mut routers, &links, Instant::default(), secs(25));
+        for router in routers.iter_mut() {
+            router.config.report_interval = None;
+            router.join_channel(key());
+        }
+        routers[0]
+            .send_to_channel(key().id(), b"pass it on", now)
+            .unwrap();
+        let sent = count_data_frames(&mut routers, &links, now, secs(2));
+        // The last node has nobody left to tell.
+        assert_eq!(sent, [1, 1, 1, 0]);
+        assert_eq!(deliveries(&mut routers[3]), [b"pass it on".to_vec()]);
+    }
+
+    #[test]
+    fn floods_are_relayed_everywhere_until_reports_arrive() {
+        let mut routers: Vec<Router> = (1..=3).map(|id| router(id, &[wifi()])).collect();
+        let links = [(0, 1, WIFI), (1, 2, WIFI), (0, 2, WIFI)];
+        for router in routers.iter_mut() {
+            router.config.report_interval = None;
+        }
+        let now = simulate(&mut routers, &links, Instant::default(), secs(8));
+        let key = || ChannelKey::from_bytes([0x78; 32]);
+        for router in routers.iter_mut() {
+            router.join_channel(key());
+        }
+        routers[0]
+            .send_to_channel(key().id(), b"no map yet", now)
+            .unwrap();
+        // Without reports, nodes can't tell who the sender reached.
+        assert_eq!(
+            count_data_frames(&mut routers, &links, now, secs(2)),
+            [1, 1, 1]
         );
     }
 

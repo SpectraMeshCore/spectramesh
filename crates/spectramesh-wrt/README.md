@@ -73,7 +73,7 @@ The map comes from **neighbor reports**: every node, ESP32s included, floods its
 
 ### Channels
 
-Channels carry encrypted group messages across the whole mesh. Make a key with `spectrameshd --generate-channel-key`, give it to every member, and list it in a file passed with `--channel-key-file` (one key per line). Every node relays channel messages, but only members can read them.
+Channels carry encrypted group messages across the whole mesh. Make a key with `spectrameshd --generate-channel-key`, give it to every member, and list it in a file passed with `--channel-key-file` (one key per line). Nodes relay channel messages, but only members can read them.
 
 ### Sending and receiving messages
 

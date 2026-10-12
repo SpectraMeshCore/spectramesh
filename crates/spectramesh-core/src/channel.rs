@@ -1,9 +1,11 @@
 //! Channels: encrypted group messages that reach the whole mesh.
 //!
 //! A channel is a 32-byte key its members share, like a Meshtastic channel.
-//! Channel messages are flooded: every node rebroadcasts each new message
-//! once, so it reaches the whole mesh, and nodes holding the key read it.
-//! Nodes without the key still relay what they can't read.
+//! Channel messages are flooded, so they reach the whole mesh, and nodes
+//! holding the key read them. Nodes relay each new message at most once, and
+//! only where the node they heard it from didn't reach (see
+//! [`Router`](crate::Router)'s relaying). Nodes without the key still relay
+//! what they can't read.
 //!
 //! Each message is encrypted with XChaCha20-Poly1305 under a key derived from
 //! the channel key. The 24-byte nonce is random, so nothing has to be counted

@@ -1,6 +1,7 @@
 //! The router's side of broadcasts: messages for neighbors, and channel
 //! messages flooded across the mesh. See [`channel`](crate::channel).
 
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -9,6 +10,7 @@ use super::{Delivery, Router};
 use crate::channel::{self, CHANNEL_OVERHEAD, ChannelId, ChannelKey, ChannelMessage};
 use crate::error::{Error, Result};
 use crate::fragment::MAX_DATAGRAM;
+use crate::hue::HueId;
 use crate::node::NodeId;
 use crate::packet::{DATA_HEADER_LEN, DataHeader};
 use crate::report::{self, NodeReport, NodeStatus, ReportedLink, ResetCause};
@@ -68,15 +70,56 @@ impl Router {
     /// Sends a broadcast payload on every hue.
     pub(super) fn flood(&mut self, header: &DataHeader, payload: &[u8]) {
         let hues: Vec<_> = self.hues.iter().map(|h| h.info.id).collect();
-        for hue in hues {
+        self.flood_on(&hues, header, payload);
+    }
+
+    fn flood_on(&mut self, hues: &[HueId], header: &DataHeader, payload: &[u8]) {
+        for &hue in hues {
             self.queue_data(hue, NodeId::BROADCAST, header, payload);
         }
     }
 
-    /// Handles a broadcast data frame: delivers it if it's for this node,
-    /// and passes channel messages on.
+    /// Passes on a flooded message heard from neighbor `from`, with one hop
+    /// less to go.
+    ///
+    /// Only where it's needed: `from` already reached its own neighbors, as
+    /// its neighbor report lists them, so this node relays only on hues
+    /// where it has a neighbor `from` doesn't (self-pruning). In a dense
+    /// mesh, most nodes then stay quiet. Until `from`'s report arrives, it
+    /// relays on every hue.
+    fn relay(&mut self, from: NodeId, header: DataHeader, payload: &[u8], now: Instant) {
+        if header.ttl <= 1 {
+            return;
+        }
+        let hues: Vec<HueId> = match self.reports.get(&from) {
+            None => self.hues.iter().map(|h| h.info.id).collect(),
+            Some(report) => {
+                let reached: BTreeSet<NodeId> = report.links.iter().map(|l| l.neighbor).collect();
+                let mut hues: Vec<HueId> = self
+                    .link_costs(now)
+                    .into_keys()
+                    .filter(|(node, _)| {
+                        *node != from && *node != header.origin && !reached.contains(node)
+                    })
+                    .map(|(_, hue)| hue)
+                    .collect();
+                hues.sort();
+                hues.dedup();
+                hues
+            }
+        };
+        let relayed = DataHeader {
+            ttl: header.ttl - 1,
+            ..header
+        };
+        self.flood_on(&hues, &relayed, payload);
+    }
+
+    /// Handles a broadcast data frame from neighbor `from`: delivers it if
+    /// it's for this node, and passes channel messages and reports on.
     pub(super) fn handle_broadcast(
         &mut self,
+        from: NodeId,
         header: DataHeader,
         payload: &[u8],
         now: Instant,
@@ -94,13 +137,7 @@ impl Router {
                 if !self.remember_broadcast(header.origin, message.message_id, now) {
                     return Ok(());
                 }
-                if header.ttl > 1 {
-                    let relayed = DataHeader {
-                        ttl: header.ttl - 1,
-                        ..header
-                    };
-                    self.flood(&relayed, payload);
-                }
+                self.relay(from, header, payload, now);
                 let opened = self.channels.iter().find_map(|key| {
                     key.open(header.origin, &message)
                         .map(|data| (key.id(), data))
@@ -121,13 +158,7 @@ impl Router {
                 {
                     return Ok(());
                 }
-                if header.ttl > 1 {
-                    let relayed = DataHeader {
-                        ttl: header.ttl - 1,
-                        ..header
-                    };
-                    self.flood(&relayed, payload);
-                }
+                self.relay(from, header, payload, now);
                 self.reports.insert(
                     header.origin,
                     NodeReport {

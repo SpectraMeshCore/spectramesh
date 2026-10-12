@@ -46,7 +46,7 @@ All three phases of the [security design](../../docs/design/wire-format-v2.md) a
 - **Deliveries say who sent them.** Each delivery carries the sender's public keys as proven by the handshake, so an application can compare the full identity hash with the one it expects.
 
 - **Members can't hijack other nodes' routes.** Every node signs the sequence numbers it issues for its own route, and nodes ignore newer sequence numbers that come without a valid signature ([`router/proofs.rs`](src/router/proofs.rs)). A member can still advertise a falsely low cost, which no practical distance-vector protocol prevents.
-- **Channels** carry encrypted group messages across the whole mesh, like Meshtastic channels ([`channel.rs`](src/channel.rs)). Members share a channel key; every node relays channel messages, but only members can read them.
+- **Channels** carry encrypted group messages across the whole mesh, like Meshtastic channels ([`channel.rs`](src/channel.rs)). Members share a channel key; nodes relay channel messages, but only members can read them. A node relays only where the node it heard a message from didn't reach, judging by that node's neighbor report, so dense meshes don't rebroadcast every message from every node.
 
 Broadcasts meant only for neighbors are protected by the mesh key alone.
 
@@ -95,4 +95,4 @@ Each is marked with a `TODO` in the code.
 - Hysteresis, so near-equal routes don't flap
 - Split horizon on wired hues, to send smaller updates on switched networks
 - Telling 1 Gbit/s from 10 Gbit/s links apart (both cost 1)
-- Choosing relays for channel messages, as OLSR's multipoint relays do, instead of every node rebroadcasting each one
+- Relaying floods after a short random wait, and staying quiet if enough neighbors relay first, which helps where links are lossy and reports go stale

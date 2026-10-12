@@ -151,9 +151,9 @@ For the future LoRa tier, where a round trip can take seconds, one-off messages 
 **Group messages** use channels, like Meshtastic's. A channel is a 32-byte key its members share, written as `smc1-` followed by 55 base32 characters, with a checksum, like a mesh key.
 
 - **Encryption:** XChaCha20-Poly1305 under a key derived from the channel key, with a random 24-byte nonce, so nothing has to be counted or stored across restarts. The origin node and a random message ID are authenticated with the data, so relays can't change them.
-- **Flooding:** every node rebroadcasts each new channel message once, until its TTL runs out, and remembers recent (origin, message ID) pairs for a minute, so copies arriving by other paths are dropped. Nodes relay every channel's messages, including ones they can't read.
+- **Flooding:** nodes rebroadcast each new channel message at most once, until its TTL runs out, and remember recent (origin, message ID) pairs for a minute, so copies arriving by other paths are dropped. Nodes relay every channel's messages, including ones they can't read. *(Changed after phase 3: relays prune themselves. A node relays a message only on hues where it has a neighbor that the node it heard the message from doesn't list in its neighbor report, so in a dense mesh most nodes stay quiet. Until that report arrives, it relays on every hue. Neighbor reports are flooded the same way.)*
 - **Limit:** messages aren't signed per sender, so any member of a channel can claim another member's node as a message's origin. Members of a channel trust each other with it; nobody else can read or forge its messages.
-- **Cost:** 46 bytes per message on top of a data frame's 51. Blind flooding sends every message once per node; choosing relays, as OLSR's multipoint relays do, would reduce that on slow hues.
+- **Cost:** 46 bytes per message on top of a data frame's 51. With self-pruning, a mesh where everyone hears everyone sends each message once, not once per node.
 
 Broadcasts meant only for neighbors stay as they were: protected by the mesh key alone, and never relayed.
 
