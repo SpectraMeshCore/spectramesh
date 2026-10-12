@@ -163,8 +163,6 @@ pub fn run(
     let now = || Instant::from_millis(start.elapsed().as_millis() as u64);
     // Link-layer address of each neighbor, learned from frames the router
     // has authenticated, so frames for one neighbor can be unicast.
-    //
-    // TODO: forget addresses of neighbors the router has dropped.
     let mut macs: BTreeMap<(HueId, NodeId), Mac> = BTreeMap::new();
     let mut next_report = now() + report_interval;
     let mut last_icmp_error = Instant::default();
@@ -244,6 +242,8 @@ pub fn run(
         if now() >= next_report {
             next_report = now() + report_interval;
             report(&router, &hues);
+            // Forget the addresses of neighbors the router has dropped.
+            macs.retain(|&(hue, node), _| router.neighbors().get(node, hue).is_some());
         }
     }
 }

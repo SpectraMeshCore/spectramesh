@@ -5,6 +5,7 @@
 //! The router task owns the [`Router`] and is the only code that touches it.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use embassy_futures::select::{Either3, select3};
@@ -14,7 +15,7 @@ use embassy_time::{Duration, Timer};
 use esp_println::println;
 use log::{debug, info, warn};
 use spectramesh_core::app::{self, Payload};
-use spectramesh_core::{Delivery, Error, HueId, Instant, Router, Transmit};
+use spectramesh_core::{Delivery, Error, HueId, Instant, NodeId, Router};
 
 use crate::console::{self, Request};
 
@@ -22,6 +23,8 @@ use crate::console::{self, Request};
 pub struct Received {
     pub hue: HueId,
     pub frame: Vec<u8>,
+    /// The sender's link-layer address, on hues that have them.
+    pub src: Option<[u8; 6]>,
     /// Signal strength in dBm, if the radio measures it.
     pub rssi: Option<i8>,
 }
@@ -32,7 +35,15 @@ const QUEUE_LEN: usize = 16;
 const REPORT_INTERVAL: Duration = Duration::from_secs(30);
 
 pub type Inbox = Channel<CriticalSectionRawMutex, Received, QUEUE_LEN>;
-pub type Outbox = Channel<CriticalSectionRawMutex, Transmit, QUEUE_LEN>;
+pub type Outbox = Channel<CriticalSectionRawMutex, Outgoing, QUEUE_LEN>;
+
+/// A frame for a hue to send.
+pub struct Outgoing {
+    pub frame: Vec<u8>,
+    /// The next hop's link-layer address, if the hue has them and it's
+    /// known; otherwise the frame is broadcast.
+    pub dst: Option<[u8; 6]>,
+}
 
 /// Frames received on any hue, waiting for the router.
 pub static INBOX: Inbox = Channel::new();
@@ -45,6 +56,9 @@ pub fn now() -> Instant {
 /// Runs the router forever. `outboxes` names the channel each hue's send task reads.
 pub async fn run(mut router: Box<Router>, outboxes: &'static [(HueId, &'static Outbox)]) -> ! {
     let mut next_report = embassy_time::Instant::now() + REPORT_INTERVAL;
+    // Link-layer address of each neighbor, learned from frames the router
+    // accepted, so frames for one neighbor can be unicast.
+    let mut addresses: BTreeMap<(HueId, NodeId), [u8; 6]> = BTreeMap::new();
     loop {
         // Wake for the router's timers, a received frame, a console
         // command, or the next report.
@@ -66,6 +80,9 @@ pub async fn run(mut router: Box<Router>, outboxes: &'static [(HueId, &'static O
         if let Some(received) = received {
             match router.handle_frame(received.hue, &received.frame, now()) {
                 Ok(Some(sender)) => {
+                    if let Some(src) = received.src {
+                        addresses.insert((received.hue, sender), src);
+                    }
                     // Only frames the router accepted count towards signal strength.
                     if let Some(rssi) = received.rssi {
                         router.record_signal(sender, received.hue, rssi);
@@ -87,8 +104,13 @@ pub async fn run(mut router: Box<Router>, outboxes: &'static [(HueId, &'static O
                 warn!("no send task for hue {}", tx.hue.0);
                 continue;
             };
+            let dst = addresses.get(&(tx.hue, tx.next_hop)).copied();
+            let outgoing = Outgoing {
+                frame: tx.frame,
+                dst,
+            };
             // Never block the router on a busy radio; routing recovers from a lost frame.
-            if outbox.try_send(tx).is_err() {
+            if outbox.try_send(outgoing).is_err() {
                 warn!("send queue full; dropped a frame");
             }
         }
@@ -99,6 +121,8 @@ pub async fn run(mut router: Box<Router>, outboxes: &'static [(HueId, &'static O
         if embassy_time::Instant::now() >= next_report {
             next_report += REPORT_INTERVAL;
             report(&router);
+            // Forget the addresses of neighbors the router has dropped.
+            addresses.retain(|&(hue, node), _| router.neighbors().get(node, hue).is_some());
         }
     }
 }

@@ -32,13 +32,13 @@ use esp_hal::clock::CpuClock;
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx};
-use esp_radio::esp_now::{BROADCAST_ADDRESS, ESP_NOW_MAX_DATA_LEN_V1, EspNowReceiver};
+use esp_radio::esp_now::EspNowReceiver;
 use esp_radio::wifi::{Interface, WifiController};
 use spectramesh_core::modem::{
     FromModem, ModemInfo, PROTOCOL_VERSION, SlipDecoder, ToModem, slip_encode,
 };
 // Linked for its panic handling: restart rather than hang.
-use spectramesh_esp as _;
+use spectramesh_esp::espnow::{self, Peers};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -112,7 +112,8 @@ async fn main(spawner: Spawner) -> ! {
     esp_now
         .set_channel(ESPNOW_CHANNEL)
         .expect("failed to set the ESP-NOW channel");
-    let (_manager, mut sender, receiver) = esp_now.split();
+    let (manager, mut sender, receiver) = esp_now.split();
+    let mut peers = Peers::new(manager);
 
     let (mut rx, tx) = UsbSerialJtag::new(peripherals.USB_DEVICE)
         .into_async()
@@ -122,7 +123,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let info = FromModem::Info(ModemInfo {
         version: PROTOCOL_VERSION,
-        mtu: ESP_NOW_MAX_DATA_LEN_V1 as u16,
+        mtu: espnow::MTU as u16,
         bitrate_bps: BITRATE_BPS,
         channel: ESPNOW_CHANNEL,
         address: station.mac_address(),
@@ -130,7 +131,7 @@ async fn main(spawner: Spawner) -> ! {
     to_host(info);
 
     // Frames from the host can be as big as ESP-NOW allows, plus framing.
-    let mut decoder = SlipDecoder::new(ESP_NOW_MAX_DATA_LEN_V1 + 16);
+    let mut decoder = SlipDecoder::new(espnow::MTU + 16);
     let mut buf = [0u8; 256];
     loop {
         // Reading from the USB serial link can't fail.
@@ -140,10 +141,9 @@ async fn main(spawner: Spawner) -> ! {
                 continue;
             };
             match ToModem::decode(&message) {
-                // Everything goes to the broadcast address; receivers check
-                // the next hop in the SpectraMesh header. See espnow.rs.
-                Ok(ToModem::Send { frame, .. }) => {
-                    let _ = sender.send_async(&BROADCAST_ADDRESS, frame).await;
+                // Unicast to a neighbor the host names, or broadcast. See espnow.rs.
+                Ok(ToModem::Send { dst, frame }) => {
+                    let _ = espnow::send_frame(&mut sender, &mut peers, Some(dst), frame).await;
                 }
                 Ok(ToModem::InfoRequest) => to_host(info),
                 Err(_) => {}

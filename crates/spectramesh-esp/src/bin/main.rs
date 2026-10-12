@@ -17,7 +17,7 @@ use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx};
-use esp_radio::esp_now::{EspNowReceiver, EspNowSender};
+use esp_radio::esp_now::{EspNowManager, EspNowReceiver, EspNowSender};
 use esp_radio::wifi::WifiController;
 use log::{info, warn};
 use spectramesh_core::{Config, HueId, KeyRing, Router};
@@ -60,8 +60,8 @@ async fn espnow_receive_task(receiver: EspNowReceiver) -> ! {
 }
 
 #[embassy_executor::task]
-async fn espnow_send_task(sender: EspNowSender) -> ! {
-    espnow::send(sender, &ESPNOW_OUTBOX).await
+async fn espnow_send_task(sender: EspNowSender, manager: EspNowManager) -> ! {
+    espnow::send(sender, manager, &ESPNOW_OUTBOX).await
 }
 
 #[allow(
@@ -140,7 +140,7 @@ async fn main(spawner: Spawner) -> ! {
     esp_now
         .set_channel(ESPNOW_CHANNEL)
         .expect("failed to set the ESP-NOW channel");
-    let (_manager, sender, receiver) = esp_now.split();
+    let (manager, sender, receiver) = esp_now.split();
 
     let started = embassy_time::Instant::now();
     let mut keys = KeyRing::new(mesh_key);
@@ -163,12 +163,12 @@ async fn main(spawner: Spawner) -> ! {
     drop(settings);
 
     spawner.spawn(espnow_receive_task(receiver).expect("task already running"));
-    spawner.spawn(espnow_send_task(sender).expect("task already running"));
+    spawner.spawn(espnow_send_task(sender, manager).expect("task already running"));
     // Boxed: the router is too big to pass on a microcontroller's stack.
     spawner.spawn(mesh_task(Box::new(router)).expect("task already running"));
     info!("SpectraMesh node {id} running on ESP-NOW channel {ESPNOW_CHANNEL}");
 
-    // Wi-Fi stays up while `wifi` and `_manager` live, so main never returns.
+    // Wi-Fi stays up while `wifi` lives, so main never returns.
     loop {
         Timer::after(Duration::from_secs(3600)).await;
     }

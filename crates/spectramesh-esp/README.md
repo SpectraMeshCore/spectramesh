@@ -101,7 +101,7 @@ The protocol (SLIP-framed messages over the USB serial link) is in `spectramesh_
 | `src/storage.rs` | Keeps the node's identity, settings and boot count in the `spectramesh` flash partition |
 | `src/console.rs` | The serial console |
 | `src/reset.rs` | Restarts, including after a panic, and why the board last started |
-| `src/espnow.rs` | The ESP-NOW hue: a receive task and a send task |
+| `src/espnow.rs` | The ESP-NOW hue: a receive task and a send task, which unicasts to neighbors whose MAC address the router task has learned (so ESP-NOW acknowledges and retries) and broadcasts the rest, in frames of up to 1,470 bytes (ESP-NOW v2) |
 | `src/bin/modem.rs` | The USB radio modem firmware |
 
 Each hue talks to the router only through channels. To add a radio, write a module like `espnow.rs` with a receive task that feeds `mesh::INBOX` and a send task that reads its own `Outbox`, then register it in `main.rs`.
@@ -115,8 +115,6 @@ The Xtensa chips (the original ESP32 and the S3) need Espressif's toolchain from
 ## Next steps
 
 - **A sub-GHz hue**: an SX1262 driver over SPI for 915 MHz FSK and LoRa (Heltec WiFi LoRa 32 V3, LilyGO T-Beam)
-- **Unicast ESP-NOW** to the next hop, for link-layer acknowledgements and retries
-- **ESP-NOW v2**, raising the MTU from 250 to 1470 bytes
 - **An application interface**, so code on the board can send and receive mesh data (today, messages go to the console)
 - **Flash encryption on real boards**; see below
 
