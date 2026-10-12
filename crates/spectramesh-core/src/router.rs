@@ -18,6 +18,7 @@ mod e2e;
 mod proofs;
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::time::Duration;
 
@@ -34,6 +35,7 @@ use crate::packet::{
     Body, DATA_HEADER_LEN, DATA_OVERHEAD, DataHeader, Frame, FrameKind, HEADER_LEN, Header, Tlv,
     Trailer,
 };
+use crate::report::NodeReport;
 use crate::routing::{self, INFINITY, Route, RouteEntry, RouteTable, SourceTable, seqno_newer};
 use crate::session::{Initiation, Session, TRANSPORT_OVERHEAD};
 use crate::time::Instant;
@@ -53,6 +55,10 @@ pub struct Config {
     /// How long to remember a neighbor's boot index and counters after its
     /// last frame. A neighbor heard again after this must pass a new challenge.
     pub peer_timeout: Duration,
+    /// How often to flood a neighbor report, from which every node builds a
+    /// map of the mesh; `None` to send none. Reports are dropped after three
+    /// intervals without an update.
+    pub report_interval: Option<Duration>,
 }
 
 impl Default for Config {
@@ -62,6 +68,7 @@ impl Default for Config {
             request_hold: Duration::from_secs(4),
             source_gc: Duration::from_secs(180),
             peer_timeout: Duration::from_secs(300),
+            report_interval: Some(Duration::from_secs(60)),
         }
     }
 }
@@ -176,8 +183,13 @@ pub struct Router {
     /// Numbers the datagrams this node fragments.
     next_datagram: u16,
     channels: Vec<ChannelKey>,
-    /// Channel messages seen recently, by (origin, message ID), and when.
+    /// Channel messages and reports seen recently, by (origin, message ID), and when.
     seen_broadcasts: BTreeMap<(NodeId, u32), Instant>,
+    /// This node's name, for the map.
+    name: String,
+    /// The latest neighbor report from each node, this one included.
+    reports: BTreeMap<NodeId, NodeReport>,
+    next_report: Instant,
 }
 
 impl Router {
@@ -228,6 +240,10 @@ impl Router {
             next_datagram: 0,
             channels: Vec::new(),
             seen_broadcasts: BTreeMap::new(),
+            name: String::new(),
+            reports: BTreeMap::new(),
+            // Give links a little time to form before the first report.
+            next_report: Instant::from_millis(10_000),
         }
     }
 
@@ -491,6 +507,7 @@ impl Router {
         self.reassembly.expire(now);
         self.expire_proofs(now);
         self.expire_broadcasts(now);
+        self.send_report(now);
         let peer_timeout = self.config.peer_timeout;
         self.peers
             .retain(|_, peer| now < peer.last_heard + peer_timeout);
@@ -1617,6 +1634,35 @@ mod tests {
             [(b"just next door".to_vec(), None)]
         );
         assert!(deliveries(&mut routers[2]).is_empty());
+    }
+
+    #[test]
+    fn every_node_learns_the_whole_map() {
+        let (mut routers, links) = line(4);
+        for (i, router) in routers.iter_mut().enumerate() {
+            router.config.report_interval = Some(secs(10));
+            router.set_name(&alloc::format!("node {}", i + 1));
+        }
+        simulate(&mut routers, &links, Instant::default(), secs(35));
+        let ids: Vec<NodeId> = routers.iter().map(Router::id).collect();
+
+        let map: BTreeMap<NodeId, &NodeReport> =
+            routers[0].mesh_map().map(|r| (r.node, r)).collect();
+        assert_eq!(map.len(), 4);
+        // Node 3's links, which node 1 isn't part of, are on node 1's map.
+        let third = map[&ids[2]];
+        assert_eq!(third.name, "node 3");
+        let mut neighbors: Vec<NodeId> = third.links.iter().map(|l| l.neighbor).collect();
+        neighbors.sort();
+        let mut expected = alloc::vec![ids[1], ids[3]];
+        expected.sort();
+        assert_eq!(neighbors, expected);
+        assert!(
+            third
+                .links
+                .iter()
+                .all(|l| l.kind == crate::report::LinkKind::Wifi { freq_mhz: 2437 })
+        );
     }
 
     #[test]

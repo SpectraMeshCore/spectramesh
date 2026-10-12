@@ -1,6 +1,7 @@
 //! The router's side of broadcasts: messages for neighbors, and channel
 //! messages flooded across the mesh. See [`channel`](crate::channel).
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::time::Duration;
 
@@ -10,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::fragment::MAX_DATAGRAM;
 use crate::node::NodeId;
 use crate::packet::{DATA_HEADER_LEN, DataHeader};
+use crate::report::{self, NodeReport, ReportedLink};
 use crate::time::Instant;
 
 /// How long to remember a channel message, so copies arriving by other
@@ -112,9 +114,86 @@ impl Router {
                     });
                 }
             }
+            report::REPORT => {
+                let (message_id, name, links) = report::decode(body)?;
+                if header.origin == self.id
+                    || !self.remember_broadcast(header.origin, message_id, now)
+                {
+                    return Ok(());
+                }
+                if header.ttl > 1 {
+                    let relayed = DataHeader {
+                        ttl: header.ttl - 1,
+                        ..header
+                    };
+                    self.flood(&relayed, payload);
+                }
+                self.reports.insert(
+                    header.origin,
+                    NodeReport {
+                        node: header.origin,
+                        name,
+                        links,
+                        received: now,
+                    },
+                );
+            }
             other => return Err(Error::UnknownMessage(other)),
         }
         Ok(())
+    }
+
+    /// Names this node on the map. At most 32 bytes are kept.
+    pub fn set_name(&mut self, name: &str) {
+        self.name = String::from(report::clip_name(name));
+    }
+
+    /// The mesh as the neighbor reports describe it: the latest report from
+    /// every node heard from recently, this one included.
+    pub fn mesh_map(&self) -> impl Iterator<Item = &NodeReport> {
+        self.reports.values()
+    }
+
+    /// Floods this node's report when it's due, and forgets stale ones.
+    pub(super) fn send_report(&mut self, now: Instant) {
+        let Some(interval) = self.config.report_interval else {
+            return;
+        };
+        self.reports.retain(|_, r| now < r.received + interval * 3);
+        if now < self.next_report {
+            return;
+        }
+        self.next_report = now + interval;
+
+        let links: Vec<ReportedLink> = self
+            .link_costs(now)
+            .into_iter()
+            .filter_map(|((neighbor, hue), cost)| {
+                Some(ReportedLink {
+                    neighbor,
+                    kind: self.hue(hue)?.kind.into(),
+                    cost,
+                })
+            })
+            .collect();
+        let message_id = self.random.next_u32();
+        let payload = report::encode(message_id, &self.name, &links);
+        self.remember_broadcast(self.id, message_id, now);
+        self.reports.insert(
+            self.id,
+            NodeReport {
+                node: self.id,
+                name: self.name.clone(),
+                links,
+                received: now,
+            },
+        );
+        let header = DataHeader {
+            origin: self.id,
+            dst: NodeId::BROADCAST,
+            ttl: self.config.default_ttl,
+        };
+        self.flood(&header, &payload);
     }
 
     /// Records a channel message as seen. Returns false if it already was.
