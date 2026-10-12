@@ -1693,7 +1693,7 @@ mod tests {
             .unwrap();
         let sent = count_data_frames(&mut routers, &links, now, secs(2));
         assert_eq!(sent, [1, 0, 0, 0]);
-        for member in 1..4 {
+        for member in [1, 2, 3] {
             assert_eq!(
                 deliveries(&mut routers[member]),
                 [b"everyone hears this".to_vec()],
