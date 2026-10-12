@@ -134,6 +134,7 @@ pub fn snapshot_json(router: &Router, hue_names: &[(u8, String)], now: Instant) 
                 LinkKind::Ethernet => ("ethernet", 0),
                 LinkKind::Wifi { freq_mhz } => ("wifi", freq_mhz),
                 LinkKind::EspNow => ("esp-now", 0),
+                LinkKind::Ieee802154 { freq_mhz } => ("ieee802154", freq_mhz),
                 LinkKind::Fsk { freq_mhz } => ("fsk", freq_mhz),
                 LinkKind::LoRa { freq_mhz } => ("lora", freq_mhz),
                 LinkKind::Ip => ("ip", 0),

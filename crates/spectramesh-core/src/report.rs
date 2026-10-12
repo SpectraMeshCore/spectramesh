@@ -17,7 +17,7 @@
 //! | 6..        | Name, UTF-8                                     |
 //! | then 1     | Number of links                                 |
 //! | then 1     | Bytes per link, 16 in this version              |
-//! | then each  | Neighbor ID (8), link kind (1), frequency in MHz (2), cost in microseconds (4), signal strength in dBm (1, signed; -128 if not measured) |
+//! | then each  | Neighbor ID (8), link kind (1: Ethernet 0, Wi-Fi 1, ESP-NOW 2, FSK 3, LoRa 4, IP 5, 802.15.4 6), frequency in MHz (2), cost in microseconds (4), signal strength in dBm (1, signed; -128 if not measured) |
 //! | then 1     | Bytes of node status that follow, 9 in this version |
 //! | then 4     | Uptime in seconds: how long the node's router has run |
 //! | then 4     | Boot count, 0 if the node doesn't count            |
@@ -55,6 +55,7 @@ pub enum LinkKind {
     Ethernet,
     Wifi { freq_mhz: u16 },
     EspNow,
+    Ieee802154 { freq_mhz: u16 },
     Fsk { freq_mhz: u16 },
     LoRa { freq_mhz: u16 },
     Ip,
@@ -67,6 +68,10 @@ impl From<HueKind> for LinkKind {
             HueKind::Ethernet => LinkKind::Ethernet,
             HueKind::Wifi { freq_mhz } => LinkKind::Wifi { freq_mhz },
             HueKind::EspNow => LinkKind::EspNow,
+            // Channel 11 is at 2405 MHz, and they're 5 MHz apart.
+            HueKind::Ieee802154 { channel } => LinkKind::Ieee802154 {
+                freq_mhz: 2405 + 5 * u16::from(channel.clamp(11, 26) - 11),
+            },
             HueKind::Fsk { freq_khz } => LinkKind::Fsk {
                 freq_mhz: mhz(freq_khz),
             },
@@ -87,6 +92,7 @@ impl LinkKind {
             LinkKind::Fsk { freq_mhz } => (3, freq_mhz),
             LinkKind::LoRa { freq_mhz } => (4, freq_mhz),
             LinkKind::Ip => (5, 0),
+            LinkKind::Ieee802154 { freq_mhz } => (6, freq_mhz),
         };
         let [hi, lo] = freq.to_be_bytes();
         [kind, hi, lo]
@@ -100,6 +106,7 @@ impl LinkKind {
             3 => LinkKind::Fsk { freq_mhz },
             4 => LinkKind::LoRa { freq_mhz },
             5 => LinkKind::Ip,
+            6 => LinkKind::Ieee802154 { freq_mhz },
             _ => return None,
         })
     }

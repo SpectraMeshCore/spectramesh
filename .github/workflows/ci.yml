@@ -100,6 +100,11 @@ jobs:
           cp target/riscv32imac-unknown-none-elf/release/spectramesh-esp images/spectramesh-esp-xiao-esp32c6
           cp target/riscv32imac-unknown-none-elf/release/spectramesh-modem images/spectramesh-modem-xiao-esp32c6
           cp partitions.csv images/
+      - run: cargo clippy --locked --no-default-features --features ieee802154,xiao-esp32c6 -- -D warnings
+      - run: cargo build --release --locked --no-default-features --features ieee802154,xiao-esp32c6
+      - run: |
+          cp target/riscv32imac-unknown-none-elf/release/spectramesh-esp images/spectramesh-esp-802154-xiao-esp32c6
+          cp target/riscv32imac-unknown-none-elf/release/spectramesh-modem images/spectramesh-modem-802154-xiao-esp32c6
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: firmware

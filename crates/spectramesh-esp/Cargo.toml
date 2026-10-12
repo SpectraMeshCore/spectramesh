@@ -9,8 +9,14 @@ repository = "https://github.com/SpectraMeshCore/spectramesh"
 publish = false
 
 [features]
+default = ["espnow"]
 # Seeed XIAO ESP32-C6: power its antenna switch and use the built-in antenna.
 xiao-esp32c6 = []
+# The built-in radio's hue: ESP-NOW over Wi-Fi, or 802.15.4. esp-radio can't
+# build both into one image, so choose one; for 802.15.4, build with
+# `--no-default-features --features ieee802154`.
+espnow = ["esp-radio/esp-now", "esp-radio/wifi"]
+ieee802154 = ["dep:ieee802154", "esp-radio/ieee802154"]
 
 [[bin]]
 name = "spectramesh-esp"
@@ -30,7 +36,9 @@ spectramesh-sx126x = { path = "../spectramesh-sx126x" }
 
 esp-hal = { version = "~1.2.2", features = ["esp32c6", "log-04", "unstable"] }
 esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio", "esp32c6", "log-04"] }
-esp-radio = { version = "1.0.0-beta.1", features = ["esp-alloc", "esp-now", "esp32c6", "log-04", "unstable", "wifi"] }
+esp-radio = { version = "1.0.0-beta.1", features = ["esp-alloc", "esp32c6", "log-04", "unstable"] }
+# 802.15.4 frame types; the version esp-radio uses.
+ieee802154 = { version = "0.6.1", optional = true }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c6", "log-04"] }
 esp-alloc = { version = "0.11.0", features = ["esp32c6"] }
 # custom-halt: restart after a panic (see reset.rs) instead of hanging.

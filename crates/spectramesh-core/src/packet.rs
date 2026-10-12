@@ -117,6 +117,11 @@ pub enum Body<'a> {
 }
 
 impl<'a> Body<'a> {
+    /// The body of a control frame, whole or reassembled: routing messages.
+    pub fn control(body: &'a [u8]) -> Self {
+        Body::Control(Tlvs(body))
+    }
+
     /// Decodes the body of a data frame, whole or reassembled.
     pub fn data(body: &'a [u8]) -> Result<Self> {
         if body.len() < DATA_HEADER_LEN {

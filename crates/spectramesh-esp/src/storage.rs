@@ -21,7 +21,7 @@ use esp_bootloader_esp_idf::partitions::{
     self, DataPartitionSubType, FlashRegion, FlashStorage, PARTITION_TABLE_MAX_LEN, PartitionType,
 };
 use esp_hal::peripherals::FLASH;
-use esp_hal::rng::Rng;
+use esp_hal::rng::Trng;
 use log::{info, warn};
 use spectramesh_core::Identity;
 use spectramesh_core::settings::{MAX_RECORD_LEN, Settings};
@@ -70,8 +70,8 @@ impl Store {
 
     /// Reads this node's identity, or creates and stores one on first boot.
     ///
-    /// `rng` must be a true random source, which it is once Wi-Fi is running.
-    pub fn load_or_create_identity(&mut self, rng: &Rng) -> Result<Identity, Error> {
+    /// `rng` is the true random number generator.
+    pub fn load_or_create_identity(&mut self, rng: &Trng) -> Result<Identity, Error> {
         self.with_region(|region| {
             let mut record = [0u8; IDENTITY_LEN];
             region.read(IDENTITY, &mut record)?;

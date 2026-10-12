@@ -214,14 +214,20 @@ fn run(config: Config) -> io::Error {
                 Err(err) => return io::Error::new(err.kind(), format!("{}: {err}", spec.device)),
             };
             let info = modem.info;
+            let kind = match modem.hue_kind() {
+                Ok(kind) => kind,
+                Err(err) => return io::Error::new(err.kind(), format!("{}: {err}", spec.device)),
+            };
             info!(
-                "modem {} on channel {}, {} bytes per frame",
-                spec.device, info.channel, info.mtu
+                "{} on {}, {} bytes per frame",
+                modem.describe(),
+                spec.device,
+                info.mtu
             );
             let bitrate = spec.bitrate_bps.unwrap_or(info.bitrate_bps.into());
             infos.push(HueInfo::new(
                 id,
-                spec.kind,
+                kind,
                 spec.mtu.unwrap_or(info.mtu),
                 bitrate,
             ));

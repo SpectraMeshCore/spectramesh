@@ -18,11 +18,12 @@ fuzz_target!(|data: &[u8]| {
         let (chunk, tail) = tail.split_at(len);
         rest = tail;
         now += u64::from(*step) * 50;
-        let header = FragmentHeader {
-            datagram: u16::from(*datagram),
-            offset: u16::from_be_bytes([*o1, *o2]),
-            total: u16::from_be_bytes([*t1, *t2]),
-        };
+        // Decoded as received, so the top bit of the total marks routing messages.
+        let (header, _) =
+            FragmentHeader::decode(&[0, *datagram, *o1, *o2, *t1, *t2]).expect("6 bytes");
+        let mut encoded = Vec::new();
+        header.encode(&mut encoded);
+        assert_eq!(encoded, [0, *datagram, *o1, *o2, *t1, *t2]);
         let sender = NodeId::from_u64(u64::from(*sender % 4));
         let at = Instant::from_millis(now);
         if let Ok(Some(whole)) = reassembly.add(sender, HueId(0), header, chunk, at) {

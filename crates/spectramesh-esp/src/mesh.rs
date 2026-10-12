@@ -177,6 +177,12 @@ fn answer(router: &mut Router, request: Request) {
                 router.neighbors().len(),
                 router.routes().count()
             );
+            for hue in (0..=u8::MAX).filter_map(|id| router.hue(HueId(id))) {
+                println!(
+                    "  hue {}: {:?}, {} bytes per frame",
+                    hue.id.0, hue.kind, hue.mtu
+                );
+            }
             for id in router.channels() {
                 println!("  channel {id}");
             }

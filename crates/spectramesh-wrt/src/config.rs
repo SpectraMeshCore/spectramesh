@@ -339,7 +339,7 @@ fn parse_hue(spec: &str) -> Result<HueSpec, String> {
         "halow" => HueKind::Wifi {
             freq_mhz: freq.unwrap_or(915),
         },
-        // The only modem firmware so far speaks ESP-NOW.
+        // Until the modem says which radio it has.
         "modem" => HueKind::EspNow,
         "udp" => HueKind::Ip,
         other => return Err(format!("unknown kind {other:?} in hue {spec:?}")),

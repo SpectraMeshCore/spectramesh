@@ -1,7 +1,7 @@
-//! Splitting data frames too big for a hue, and putting them back together.
+//! Splitting frames too big for a hue, and putting them back together.
 //!
-//! Fragmentation is per hop: a node splits a data frame's body into
-//! fragment frames sized for the next hue, and the next node reassembles it
+//! Fragmentation is per hop: a node splits a data frame's body, or a control
+//! frame's routing messages, into fragment frames sized for the next hue, and the next node reassembles it
 //! before routing it further, perhaps splitting it again for a smaller hue.
 //! Each fragment carries its own link tag, so nodes outside the mesh can't
 //! inject fragments.
@@ -12,7 +12,7 @@
 //! |-------|-----------------------------------------------------------|
 //! | 0..2  | Datagram ID, counted by the sender                        |
 //! | 2..4  | Offset of this chunk in the reassembled body              |
-//! | 4..6  | Length of the reassembled body                            |
+//! | 4..6  | Length of the reassembled body; the top bit is set if the body is routing messages (a control frame's) rather than data |
 //! | 6..   | The chunk                                                 |
 //!
 //! Reassembly is bounded: at most [`MAX_DATAGRAM`] bytes per datagram, at most
@@ -38,18 +38,29 @@ pub const MAX_PENDING: usize = 8;
 /// How long a datagram may take to arrive in full.
 pub const REASSEMBLY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The bit of the length field that marks routing messages.
+const CONTROL_BIT: u16 = 0x8000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FragmentHeader {
     pub datagram: u16,
     pub offset: u16,
     pub total: u16,
+    /// Whether the reassembled body is routing messages, as a control
+    /// frame's body, rather than a data frame's.
+    pub control: bool,
 }
 
 impl FragmentHeader {
     pub fn encode(&self, buf: &mut Vec<u8>) {
+        let total = if self.control {
+            self.total | CONTROL_BIT
+        } else {
+            self.total
+        };
         buf.extend_from_slice(&self.datagram.to_be_bytes());
         buf.extend_from_slice(&self.offset.to_be_bytes());
-        buf.extend_from_slice(&self.total.to_be_bytes());
+        buf.extend_from_slice(&total.to_be_bytes());
     }
 
     /// Splits a fragment body into its header and chunk.
@@ -61,14 +72,21 @@ impl FragmentHeader {
         let header = FragmentHeader {
             datagram: field(0),
             offset: field(2),
-            total: field(4),
+            total: field(4) & !CONTROL_BIT,
+            control: field(4) & CONTROL_BIT != 0,
         };
         Ok((header, &body[FRAGMENT_HEADER_LEN..]))
     }
 }
 
-/// Splits `body` into chunks of at most `chunk_len` bytes, each with its header.
-pub fn split(body: &[u8], datagram: u16, chunk_len: usize) -> Vec<(FragmentHeader, &[u8])> {
+/// Splits `body` into chunks of at most `chunk_len` bytes, each with its
+/// header. `control` says whether it's a control frame's body.
+pub fn split(
+    body: &[u8],
+    datagram: u16,
+    chunk_len: usize,
+    control: bool,
+) -> Vec<(FragmentHeader, &[u8])> {
     body.chunks(chunk_len.max(1))
         .enumerate()
         .map(|(i, chunk)| {
@@ -76,6 +94,7 @@ pub fn split(body: &[u8], datagram: u16, chunk_len: usize) -> Vec<(FragmentHeade
                 datagram,
                 offset: (i * chunk_len) as u16,
                 total: body.len() as u16,
+                control,
             };
             (header, chunk)
         })
@@ -84,6 +103,7 @@ pub fn split(body: &[u8], datagram: u16, chunk_len: usize) -> Vec<(FragmentHeade
 
 struct Partial {
     started: Instant,
+    control: bool,
     data: Vec<u8>,
     /// One bit per byte of `data`: whether it has arrived.
     arrived: Vec<u8>,
@@ -97,10 +117,11 @@ pub struct Reassembly {
 }
 
 impl Reassembly {
-    /// Adds a fragment. Returns the whole body once every byte has arrived.
+    /// Adds a fragment. Returns the whole body once every byte has arrived;
+    /// it's a control frame's body if `header.control` is set.
     ///
-    /// Fragments that disagree about the length, run past the end, or would
-    /// exceed the limits are rejected; repeated bytes are ignored.
+    /// Fragments that disagree about the length or kind, run past the end,
+    /// or would exceed the limits are rejected; repeated bytes are ignored.
     pub fn add(
         &mut self,
         sender: NodeId,
@@ -132,6 +153,7 @@ impl Reassembly {
                 key,
                 Partial {
                     started: now,
+                    control: header.control,
                     data: vec![0; total],
                     arrived: vec![0; total.div_ceil(8)],
                     remaining: total,
@@ -139,7 +161,7 @@ impl Reassembly {
             );
         }
         let partial = self.pending.get_mut(&key).expect("inserted above");
-        if partial.data.len() != total {
+        if partial.data.len() != total || partial.control != header.control {
             self.pending.remove(&key);
             return Err(Error::BadFragment);
         }
@@ -188,7 +210,7 @@ mod tests {
     #[test]
     fn reassembles_in_any_order() {
         let data = body(1000);
-        let mut fragments = split(&data, 7, 210);
+        let mut fragments = split(&data, 7, 210, false);
         assert_eq!(fragments.len(), 5);
         fragments.reverse();
 
@@ -210,6 +232,7 @@ mod tests {
             datagram: 1,
             offset,
             total,
+            control: false,
         };
         let too_big = header(0, MAX_DATAGRAM as u16 + 1);
         assert_eq!(
@@ -229,6 +252,33 @@ mod tests {
             Err(Error::BadFragment)
         );
         assert!(reassembly.is_empty());
+
+        // A fragment that changes the body's kind spoils its datagram.
+        assert_eq!(reassembly.add(A, HUE, header(0, 100), &[1], NOW), Ok(None));
+        let control = FragmentHeader {
+            control: true,
+            ..header(1, 100)
+        };
+        assert_eq!(
+            reassembly.add(A, HUE, control, &[2], NOW),
+            Err(Error::BadFragment)
+        );
+    }
+
+    #[test]
+    fn headers_say_what_kind_of_body_they_carry() {
+        for control in [false, true] {
+            let header = FragmentHeader {
+                datagram: 0xbeef,
+                offset: 70,
+                total: MAX_DATAGRAM as u16,
+                control,
+            };
+            let mut encoded = Vec::new();
+            header.encode(&mut encoded);
+            encoded.push(9);
+            assert_eq!(FragmentHeader::decode(&encoded), Ok((header, &[9][..])));
+        }
     }
 
     #[test]
@@ -239,6 +289,7 @@ mod tests {
                 datagram,
                 offset: 0,
                 total: 100,
+                control: false,
             };
             reassembly.add(A, HUE, header, &[1], NOW).unwrap();
         }

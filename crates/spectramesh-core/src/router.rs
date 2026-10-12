@@ -356,7 +356,11 @@ impl Router {
                 match self.reassembly.add(sender, hue, header, chunk, now)? {
                     Some(whole) => {
                         reassembled = whole;
-                        Body::data(&reassembled)?
+                        if header.control {
+                            Body::control(&reassembled)
+                        } else {
+                            Body::data(&reassembled)?
+                        }
                     }
                     None => return Ok(Some(sender)),
                 }
@@ -844,13 +848,16 @@ impl Router {
         }
     }
 
+    /// Sends routing messages, packed into as few frames as fit the hue. A
+    /// message too big for the hue on its own, such as a seqno proof on an
+    /// 802.15.4 hue, goes in fragments.
     fn send_control(&mut self, hue: HueId, next_hop: NodeId, tlvs: &[Tlv]) {
         let mtu = self.mtu(hue);
         let mut frame = Vec::new();
         for tlv in tlvs {
             if frame.len() > HEADER_LEN && frame.len() + tlv.encoded_len() + TRAILER_LEN > mtu {
                 let full = core::mem::take(&mut frame);
-                self.transmit(hue, next_hop, full);
+                self.transmit_control(hue, next_hop, full);
             }
             if frame.is_empty() {
                 self.header(FrameKind::Control, next_hop).encode(&mut frame);
@@ -858,7 +865,17 @@ impl Router {
             tlv.encode(&mut frame);
         }
         if !frame.is_empty() {
+            self.transmit_control(hue, next_hop, frame);
+        }
+    }
+
+    /// Sends a control frame (its header and messages, without a trailer),
+    /// in fragments if it's too big for the hue.
+    fn transmit_control(&mut self, hue: HueId, next_hop: NodeId, frame: Vec<u8>) {
+        if frame.len() + TRAILER_LEN <= self.mtu(hue) {
             self.transmit(hue, next_hop, frame);
+        } else {
+            self.send_fragments(hue, next_hop, &frame[HEADER_LEN..], true);
         }
     }
 
@@ -889,12 +906,19 @@ impl Router {
         let mut body = Vec::with_capacity(DATA_HEADER_LEN + payload.len());
         data.encode(&mut body);
         body.extend_from_slice(payload);
+        self.send_fragments(hue, next_hop, &body, false);
+    }
+
+    /// Sends a frame body in fragments sized for the hue. `control` says
+    /// whether it's a control frame's body or a data frame's.
+    fn send_fragments(&mut self, hue: HueId, next_hop: NodeId, body: &[u8], control: bool) {
+        let mtu = self.mtu(hue);
         let chunk_len = mtu.saturating_sub(HEADER_LEN + FRAGMENT_HEADER_LEN + TRAILER_LEN);
         if body.len() > MAX_DATAGRAM || chunk_len == 0 {
             return;
         }
         self.next_datagram = self.next_datagram.wrapping_add(1);
-        for (header, chunk) in fragment::split(&body, self.next_datagram, chunk_len) {
+        for (header, chunk) in fragment::split(body, self.next_datagram, chunk_len, control) {
             let mut frame = Vec::with_capacity(mtu);
             self.header(FrameKind::Fragment, next_hop)
                 .encode(&mut frame);
@@ -960,6 +984,7 @@ mod tests {
     const WIFI: HueId = HueId(0);
     const SUB_GHZ: HueId = HueId(1);
     const ETHERNET: HueId = HueId(2);
+    const IEEE802154: HueId = HueId(3);
 
     fn wifi() -> HueInfo {
         HueInfo::new(WIFI, HueKind::Wifi { freq_mhz: 2437 }, 1400, 20_000_000)
@@ -968,6 +993,17 @@ mod tests {
     /// A 915 MHz FSK backbone link: slower than Wi-Fi, but not LoRa-slow.
     fn sub_ghz() -> HueInfo {
         HueInfo::new(SUB_GHZ, HueKind::Fsk { freq_khz: 915_000 }, 255, 250_000)
+    }
+
+    /// 802.15.4, as on an ESP32-C6: 127-byte frames, of which 110 are left
+    /// after the MAC header and checksum.
+    fn ieee802154() -> HueInfo {
+        HueInfo::new(
+            IEEE802154,
+            HueKind::Ieee802154 { channel: 15 },
+            110,
+            250_000,
+        )
     }
 
     /// Gigabit Ethernet or fiber.
@@ -1019,6 +1055,13 @@ mod tests {
             for i in 0..routers.len() {
                 routers[i].poll(now);
                 while let Some(tx) = routers[i].poll_transmit() {
+                    // Nothing may be too big for the hue it goes out on.
+                    let mtu = routers[i].mtu(tx.hue);
+                    assert!(
+                        tx.frame.len() <= mtu,
+                        "router {i} sent {} bytes on a hue with an MTU of {mtu}",
+                        tx.frame.len()
+                    );
                     for &(a, b, hue) in links {
                         let peer = match (a == i, b == i) {
                             (true, _) => b,
@@ -1077,6 +1120,65 @@ mod tests {
                 channel: None,
             })
         );
+    }
+
+    #[test]
+    fn routes_form_and_data_crosses_127_byte_frames() {
+        // Seqno proofs (130 bytes) and identities don't fit an 802.15.4
+        // frame whole, so they cross in fragments; without them, no route
+        // would be accepted.
+        let mut routers: Vec<Router> = (1..=3).map(|id| router(id, &[ieee802154()])).collect();
+        let links = [(0, 1, IEEE802154), (1, 2, IEEE802154)];
+        let now = simulate(&mut routers, &links, Instant::default(), secs(60));
+        assert_eq!(
+            next_hop(&routers[0], &routers[2]),
+            Some((routers[1].id(), IEEE802154))
+        );
+
+        let far = routers[2].id();
+        let message = [7u8; 300];
+        routers[0].send(far, &message, now).unwrap();
+        simulate(&mut routers, &links, now, secs(5));
+        assert_eq!(deliveries(&mut routers[2]), [message.to_vec()]);
+    }
+
+    #[test]
+    fn routes_mix_hues_hop_by_hop() {
+        // A has only ESP-NOW, C only 802.15.4, and B both, so everything
+        // between A and C changes hue at B.
+        let espnow = HueInfo::new(WIFI, HueKind::EspNow, 1470, 1_000_000);
+        let mut routers = alloc::vec![
+            router(1, &[espnow]),
+            router(2, &[espnow, ieee802154()]),
+            router(3, &[ieee802154()]),
+        ];
+        let links = [(0, 1, WIFI), (1, 2, IEEE802154)];
+        let now = simulate(&mut routers, &links, Instant::default(), secs(60));
+        let (a, b, c) = (routers[0].id(), routers[1].id(), routers[2].id());
+        assert_eq!(next_hop(&routers[0], &routers[2]), Some((b, WIFI)));
+        assert_eq!(next_hop(&routers[2], &routers[0]), Some((b, IEEE802154)));
+        assert_eq!(next_hop(&routers[1], &routers[0]), Some((a, WIFI)));
+        assert_eq!(next_hop(&routers[1], &routers[2]), Some((c, IEEE802154)));
+        // ESP-NOW's 800 µs plus 802.15.4's 3,200 µs, on clean links.
+        assert_eq!(routers[0].route_to(c).unwrap().metric, 4000);
+
+        // 1,200 bytes travel whole over ESP-NOW and in fragments over 802.15.4.
+        let message = [9u8; 1200];
+        routers[0].send(c, &message, now).unwrap();
+        routers[2].send(a, b"and back", now).unwrap();
+        let now = simulate(&mut routers, &links, now, secs(5));
+        assert_eq!(deliveries(&mut routers[2]), [message.to_vec()]);
+        assert_eq!(deliveries(&mut routers[0]), [b"and back".to_vec()]);
+
+        // A channel message from A reaches C across both hues.
+        let key = || ChannelKey::from_bytes([0x15; 32]);
+        routers[0].join_channel(key());
+        routers[2].join_channel(key());
+        routers[0]
+            .send_to_channel(key().id(), b"to all", now)
+            .unwrap();
+        simulate(&mut routers, &links, now, secs(2));
+        assert_eq!(deliveries(&mut routers[2]), [b"to all".to_vec()]);
     }
 
     #[test]

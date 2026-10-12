@@ -13,6 +13,7 @@
 //! | `mesh-keys KEY...`        | Saves the mesh keys; the first is sent with, the others are also accepted |
 //! | `name [NAME]`             | Saves this node's name for the map, or clears it |
 //! | `channel-keys [KEY...]`   | Saves the channels to join, or none            |
+//! | `radio RADIO`             | Saves the 802.15.4 channel, as `802.15.4:CHANNEL` (11 to 26), on firmware built for 802.15.4 |
 //! | `erase-settings`          | Forgets the keys, name and channels; keeps the identity |
 //! | `restart`                 | Restarts, applying saved settings              |
 //! | `send NODE TEXT`          | Sends TEXT to one node, encrypted end to end   |
@@ -32,6 +33,7 @@ use esp_println::println;
 use spectramesh_core::settings::{MAX_CHANNEL_KEYS, MAX_MESH_KEYS, Settings};
 use spectramesh_core::{ChannelKey, MeshKey, NodeId};
 
+use crate::radio::Radio;
 use crate::reset;
 use crate::storage::Store;
 
@@ -40,7 +42,8 @@ const MAX_LINE: usize = 512;
 
 const HELP: &str = "\
 commands: help, info, mesh-keys KEY..., name [NAME], channel-keys [KEY...],
-          erase-settings, restart, send NODE TEXT, channel CHANNEL TEXT";
+          radio esp-now|802.15.4[:CHANNEL], erase-settings, restart,
+          send NODE TEXT, channel CHANNEL TEXT";
 
 /// Commands only the router can carry out.
 pub enum Request {
@@ -115,6 +118,10 @@ async fn handle(line: &str, store: &mut Store, context: &Context) {
             }
         }
         "name" => update(store, |settings| settings.name = rest.into()),
+        "radio" => match Radio::from_setting(rest) {
+            Ok(radio) => update(store, |settings| settings.radio = radio.to_setting()),
+            Err(err) => println!("error {err}"),
+        },
         "channel-keys" => {
             let keys: Result<Vec<ChannelKey>, _> =
                 rest.split_whitespace().map(ChannelKey::from_text).collect();

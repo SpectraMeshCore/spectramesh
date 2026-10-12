@@ -176,8 +176,8 @@ pub fn run(
     let hue_names: Vec<(u8, String)> = hues
         .iter()
         .map(|h| {
-            let name = match h.link {
-                Link::Modem(_) => "ESP-NOW via modem".to_string(),
+            let name = match &h.link {
+                Link::Modem(modem) => modem.describe(),
                 Link::Ethernet(_) => h.device.clone(),
                 Link::Udp(_) => format!("UDP {}", h.device),
             };

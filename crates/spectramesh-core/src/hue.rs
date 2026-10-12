@@ -4,6 +4,11 @@
 //! `spectramesh-wrt`, ...) register each hue with the router, then move frames
 //! between the router and the radio.
 //!
+//! A node can have any number of hues, and routes mix them hop by hop: a
+//! route may cross ESP-NOW to one node and 802.15.4 or Ethernet to the next.
+//! Each hue has its own neighbors, link costs and timers, and broadcasts go
+//! out on every hue.
+//!
 //! Routing only looks at a hue's numbers (bitrate, MTU, timers and
 //! [`LinkModel`]), never at its band. A 915 MHz radio running HaLow or FSK is
 //! a backbone link, and the same radio running LoRa is a slow one; the bitrate
@@ -26,6 +31,11 @@ pub enum HueKind {
         freq_mhz: u16,
     },
     EspNow,
+    /// IEEE 802.15.4, the 2.4 GHz radio under Thread and Zigbee, on one of
+    /// channels 11 to 26: 250 kbit/s in frames of 127 bytes.
+    Ieee802154 {
+        channel: u8,
+    },
     /// FSK or GFSK packet radio, such as an SX126x or CC13xx in FSK mode.
     Fsk {
         freq_khz: u32,

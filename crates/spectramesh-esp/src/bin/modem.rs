@@ -1,12 +1,16 @@
 //! `spectramesh-modem`: turns an ESP32 into a USB radio modem.
 //!
-//! It runs no router. It passes every ESP-NOW frame it hears to the host over
+//! It runs no router. It passes every frame its radio hears to the host over
 //! USB, and sends whatever the host asks it to, using the protocol in
 //! `spectramesh_core::modem`. The host (`spectrameshd` with a `kind=modem`
 //! hue) is the mesh node, with its own identity and keys, so the modem holds
 //! no secrets and needs no mesh key.
 //!
 //! It doesn't log either: the USB serial link carries only the protocol.
+//!
+//! The radio is ESP-NOW, or 802.15.4 when built with `--no-default-features
+//! --features ieee802154`; the modem tells the host which. A computer with
+//! one of each joins both hues, and routes between them.
 
 #![no_std]
 #![no_main]
@@ -32,23 +36,47 @@ use esp_hal::clock::CpuClock;
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx};
+#[cfg(feature = "espnow")]
 use esp_radio::esp_now::EspNowReceiver;
+#[cfg(feature = "ieee802154")]
+use esp_radio::ieee802154::Ieee802154;
+#[cfg(feature = "espnow")]
 use esp_radio::wifi::{Interface, WifiController};
 use spectramesh_core::modem::{
-    FromModem, ModemInfo, PROTOCOL_VERSION, SlipDecoder, ToModem, slip_encode,
+    FromModem, ModemInfo, ModemRadio, PROTOCOL_VERSION, SlipDecoder, ToModem, slip_encode,
 };
-// Linked for its panic handling: restart rather than hang.
+// Also linked for its panic handling: restart rather than hang.
+#[cfg(feature = "espnow")]
 use spectramesh_esp::espnow::{self, Peers};
+#[cfg(feature = "ieee802154")]
+use spectramesh_esp::ieee802154::{self, Link};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
 /// Transmit power in quarter dBm: 80 is 20 dBm.
+#[cfg(feature = "espnow")]
 const TX_POWER_QUARTER_DBM: i8 = 80;
 
 /// The Wi-Fi channel ESP-NOW uses; it must match the mesh's ESP32 nodes.
+#[cfg(feature = "espnow")]
 const ESPNOW_CHANNEL: u8 = 1;
 /// ESP-NOW's default PHY rate.
+#[cfg(feature = "espnow")]
 const BITRATE_BPS: u32 = 1_000_000;
+
+/// The 802.15.4 channel; it must match the mesh's 802.15.4 nodes.
+#[cfg(feature = "ieee802154")]
+const IEEE802154_CHANNEL: u8 = spectramesh_esp::radio::DEFAULT_CHANNEL;
+
+/// The largest frame the radio carries.
+#[cfg(feature = "espnow")]
+const MTU: usize = espnow::MTU;
+#[cfg(feature = "ieee802154")]
+const MTU: usize = ieee802154::MTU;
+
+/// Frames from the host for the 802.15.4 task, which owns the radio.
+#[cfg(feature = "ieee802154")]
+static TO_RADIO: Channel<CriticalSectionRawMutex, Vec<u8>, 8> = Channel::new();
 
 /// SLIP-framed messages waiting to go to the host. When the host isn't
 /// reading, frames are dropped rather than holding up the radio.
@@ -60,6 +88,7 @@ fn to_host(message: FromModem<'_>) {
     let _ = TO_HOST.try_send(framed);
 }
 
+#[cfg(feature = "espnow")]
 #[embassy_executor::task]
 async fn radio_to_host(mut receiver: EspNowReceiver) -> ! {
     loop {
@@ -69,6 +98,34 @@ async fn radio_to_host(mut receiver: EspNowReceiver) -> ! {
             rssi: received.info.rx_control.rssi.clamp(-128, 127) as i8,
             frame: received.data(),
         });
+    }
+}
+
+/// Runs the 802.15.4 radio: what it hears goes to the host, and what the
+/// host sends goes out.
+#[cfg(feature = "ieee802154")]
+#[embassy_executor::task]
+async fn ieee802154_radio(mut link: Link) -> ! {
+    use embassy_futures::select::{Either, select};
+    loop {
+        match select(link.wait(), TO_RADIO.receive()).await {
+            Either::First(()) => {
+                for incoming in link.take_received() {
+                    // The host keys neighbors by 6-byte addresses: use the
+                    // low 6 bytes of the sender's 8.
+                    let mut src = [0u8; 6];
+                    if let Some(address) = incoming.src {
+                        src.copy_from_slice(&address.to_be_bytes()[2..]);
+                    }
+                    to_host(FromModem::Received {
+                        src,
+                        rssi: incoming.rssi,
+                        frame: &incoming.frame,
+                    });
+                }
+            }
+            Either::Second(frame) => link.send(frame).await,
+        }
     }
 }
 
@@ -100,38 +157,63 @@ async fn main(spawner: Spawner) -> ! {
         Output::new(peripherals.GPIO14, Level::Low, OutputConfig::default()),
     );
 
-    let mut wifi =
-        WifiController::new(peripherals.WIFI, Default::default()).expect("failed to start Wi-Fi");
-    // esp-radio starts the radio at 5 dBm. Mesh links need range, so use
-    // 20 dBm (units are quarter dBm), the most 2.4 GHz rules allow without
-    // a high-gain antenna.
-    wifi.set_max_tx_power(TX_POWER_QUARTER_DBM)
-        .expect("failed to set transmit power");
-    let station = Interface::station();
-    let esp_now = wifi.esp_now();
-    esp_now
-        .set_channel(ESPNOW_CHANNEL)
-        .expect("failed to set the ESP-NOW channel");
-    let (manager, mut sender, receiver) = esp_now.split();
-    let mut peers = Peers::new(manager);
+    #[cfg(feature = "espnow")]
+    let (_wifi, mut sender, mut peers, info) = {
+        let mut wifi = WifiController::new(peripherals.WIFI, Default::default())
+            .expect("failed to start Wi-Fi");
+        // esp-radio starts the radio at 5 dBm. Mesh links need range, so use
+        // 20 dBm (units are quarter dBm), the most 2.4 GHz rules allow
+        // without a high-gain antenna.
+        wifi.set_max_tx_power(TX_POWER_QUARTER_DBM)
+            .expect("failed to set transmit power");
+        let station = Interface::station();
+        let esp_now = wifi.esp_now();
+        esp_now
+            .set_channel(ESPNOW_CHANNEL)
+            .expect("failed to set the ESP-NOW channel");
+        let (manager, sender, receiver) = esp_now.split();
+        spawner.spawn(radio_to_host(receiver).expect("task already running"));
+        let info = ModemInfo {
+            version: PROTOCOL_VERSION,
+            mtu: MTU as u16,
+            bitrate_bps: BITRATE_BPS,
+            channel: ESPNOW_CHANNEL,
+            address: station.mac_address(),
+            radio: ModemRadio::EspNow,
+        };
+        (wifi, sender, Peers::new(manager), info)
+    };
+    #[cfg(feature = "ieee802154")]
+    let info = {
+        let mac = *esp_hal::efuse::base_mac_address()
+            .as_bytes()
+            .first_chunk::<6>()
+            .expect("6 bytes");
+        let link = Link::new(
+            Ieee802154::new(peripherals.IEEE802154),
+            ieee802154::eui64(mac),
+            IEEE802154_CHANNEL,
+        );
+        spawner.spawn(ieee802154_radio(link).expect("task already running"));
+        ModemInfo {
+            version: PROTOCOL_VERSION,
+            mtu: MTU as u16,
+            bitrate_bps: 250_000,
+            channel: IEEE802154_CHANNEL,
+            address: mac,
+            radio: ModemRadio::Ieee802154,
+        }
+    };
 
     let (mut rx, tx) = UsbSerialJtag::new(peripherals.USB_DEVICE)
         .into_async()
         .split();
-    spawner.spawn(radio_to_host(receiver).expect("task already running"));
     spawner.spawn(write_to_host(tx).expect("task already running"));
-
-    let info = FromModem::Info(ModemInfo {
-        version: PROTOCOL_VERSION,
-        mtu: espnow::MTU as u16,
-        bitrate_bps: BITRATE_BPS,
-        channel: ESPNOW_CHANNEL,
-        address: station.mac_address(),
-    });
+    let info = FromModem::Info(info);
     to_host(info);
 
-    // Frames from the host can be as big as ESP-NOW allows, plus framing.
-    let mut decoder = SlipDecoder::new(espnow::MTU + 16);
+    // Frames from the host can be as big as the radio allows, plus framing.
+    let mut decoder = SlipDecoder::new(MTU + 16);
     let mut buf = [0u8; 256];
     loop {
         // Reading from the USB serial link can't fail.
@@ -141,9 +223,18 @@ async fn main(spawner: Spawner) -> ! {
                 continue;
             };
             match ToModem::decode(&message) {
-                // Unicast to a neighbor the host names, or broadcast. See espnow.rs.
+                // ESP-NOW unicasts to a neighbor the host names, or
+                // broadcasts. See espnow.rs.
+                #[cfg(feature = "espnow")]
                 Ok(ToModem::Send { dst, frame }) => {
                     let _ = espnow::send_frame(&mut sender, &mut peers, Some(dst), frame).await;
+                }
+                // 802.15.4 broadcasts everything. See ieee802154.rs.
+                #[cfg(feature = "ieee802154")]
+                Ok(ToModem::Send { frame, .. }) => {
+                    if TO_RADIO.try_send(frame.to_vec()).is_err() {
+                        // The radio is behind; drop the frame, as a radio would.
+                    }
                 }
                 Ok(ToModem::InfoRequest) => to_host(info),
                 Err(_) => {}

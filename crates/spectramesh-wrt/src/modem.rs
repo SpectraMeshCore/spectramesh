@@ -1,7 +1,7 @@
 //! A radio modem on a serial port, as a hue.
 //!
 //! The modem is a microcontroller running `spectramesh-modem`, such as an
-//! ESP32 for ESP-NOW. It passes frames between its radio and the serial link
+//! ESP32 for ESP-NOW or 802.15.4. It passes frames between its radio and the serial link
 //! using the protocol in `spectramesh_core::modem`; this daemon is the mesh
 //! node, with its own identity and keys.
 
@@ -14,8 +14,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use spectramesh_core::modem::{
-    FromModem, ModemInfo, PROTOCOL_VERSION, SlipDecoder, ToModem, slip_encode,
+    FromModem, ModemInfo, ModemRadio, PROTOCOL_VERSION, SlipDecoder, ToModem, slip_encode,
 };
+
+use spectramesh_core::HueKind;
 
 use crate::link::Mac;
 
@@ -52,6 +54,7 @@ impl Modem {
                 bitrate_bps: 0,
                 channel: 0,
                 address: [0; 6],
+                radio: ModemRadio::EspNow,
             },
         };
 
@@ -66,11 +69,12 @@ impl Modem {
             }
             for message in reader.read_messages()? {
                 if let Ok(FromModem::Info(info)) = FromModem::decode(&message) {
-                    if info.version != PROTOCOL_VERSION {
+                    // Version 1 differs only in not naming its radio, ESP-NOW.
+                    if !(1..=PROTOCOL_VERSION).contains(&info.version) {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             format!(
-                                "{path} speaks modem protocol {}, not {PROTOCOL_VERSION}",
+                                "{path} speaks modem protocol {}, not 1 to {PROTOCOL_VERSION}",
                                 info.version
                             ),
                         ));
@@ -96,6 +100,31 @@ impl Modem {
         slip_encode(&message.encode(), &mut framed);
         let mut port = self.port.lock().expect("no panics while holding the port");
         port.write_all(&framed)
+    }
+}
+
+impl Modem {
+    /// The kind of hue the modem's radio makes.
+    pub fn hue_kind(&self) -> io::Result<HueKind> {
+        match self.info.radio {
+            ModemRadio::EspNow => Ok(HueKind::EspNow),
+            ModemRadio::Ieee802154 => Ok(HueKind::Ieee802154 {
+                channel: self.info.channel,
+            }),
+            ModemRadio::Unknown(code) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("the modem has a radio this version doesn't know ({code})"),
+            )),
+        }
+    }
+
+    /// What to call the modem's hue on the map.
+    pub fn describe(&self) -> String {
+        match self.info.radio {
+            ModemRadio::EspNow => "ESP-NOW via modem".into(),
+            ModemRadio::Ieee802154 => format!("802.15.4 channel {} via modem", self.info.channel),
+            ModemRadio::Unknown(_) => "modem".into(),
+        }
     }
 }
 

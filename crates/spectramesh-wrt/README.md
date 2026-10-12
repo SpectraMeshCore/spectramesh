@@ -15,7 +15,7 @@ SpectraMesh frames travel directly inside Ethernet frames (EtherType `0x88B5`), 
 
 Wired links use the reliable link model and radio links the lossy one (see the core README), so cabled routers prefer the cable and fall back to radio when it's cut.
 
-**ESP-NOW, through a USB radio modem.** An ESP32 running `spectramesh-modem` (see `spectramesh-esp`) gives any Linux machine an ESP-NOW hue, so a laptop can join a mesh of ESP32 nodes: `--hue /dev/serial/by-id/...,kind=modem`. The modem reports its own MTU and bitrate. Serial ports need membership of the `dialout` group, not root.
+**ESP-NOW or 802.15.4, through a USB radio modem.** An ESP32 running `spectramesh-modem` (see `spectramesh-esp`) gives any Linux machine an ESP-NOW or 802.15.4 hue, so a laptop can join a mesh of ESP32 nodes: `--hue /dev/serial/by-id/...,kind=modem`. The modem reports its radio, MTU and bitrate. With one modem of each kind, the laptop joins both hues and routes between them. Serial ports need membership of the `dialout` group, not root.
 
 **A laptop's own Wi-Fi.** A laptop connected to a router's ordinary Wi-Fi network can reach a router running `spectrameshd` on that network's bridge with an Ethernet-style hue on its Wi-Fi interface (`--hue wlp164s0,kind=wifi,bitrate=100M`): SpectraMesh frames travel inside the Wi-Fi network like Ethernet frames. Joining an 802.11s mesh directly needs a card whose driver supports mesh mode; Intel cards' generally doesn't.
 
@@ -112,7 +112,7 @@ Node IDs are random, because each run creates new keys.
 
 The same scenario runs as a test: `cargo test -p spectramesh-wrt -- --ignored`.
 
-`tests/udp.rs` runs three daemons linked by UDP on this host, with no privileges: two spokes that only know a hub's address, and the hub, which learns them. The spokes route to each other through the hub and exchange a message.
+`tests/udp.rs` runs three daemons linked by UDP on this host, with no privileges: two spokes that only know a hub's address, and the hub, which learns them. The spokes route to each other through the hub and exchange a message. `tests/multi_hue.rs` (ignored by default; about 20 seconds) gives the hub two hues, one to each of two nodes that also share a slow third hue: their routes change hue at the hub, and fall back to the slow hue when the hub stops.
 
 ## OpenWRT
 

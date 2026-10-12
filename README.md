@@ -36,6 +36,8 @@ cargo run --release                                # flash a board, from crates/
 spectrameshd --provision PORT --mesh-key-file FILE # then give it the mesh key
 ```
 
+What's waiting on hardware or decisions is in [TODO.md](TODO.md).
+
 ## License
 
 Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option.

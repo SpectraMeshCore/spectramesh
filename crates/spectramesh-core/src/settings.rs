@@ -14,6 +14,7 @@
 //! | 1     | A mesh key (32). Repeatable: the first is sent with, the others are also accepted |
 //! | 2     | This node's name, UTF-8, for the map                        |
 //! | 3     | A channel key to join (32). Repeatable                      |
+//! | 4     | Which radio to use, as text the platform defines, such as `802.15.4:25` (at most 16 bytes) |
 //!
 //! Unknown entries are skipped, so later versions can add settings.
 //! Platforms write the record to one of two places in turn, with the
@@ -38,6 +39,10 @@ const CRC_LEN: usize = 4;
 const MESH_KEY: u8 = 1;
 const NAME: u8 = 2;
 const CHANNEL_KEY: u8 = 3;
+const RADIO: u8 = 4;
+
+/// The longest radio setting, in bytes.
+pub const MAX_RADIO_LEN: usize = 16;
 
 /// The most mesh keys a record holds: one to send with, and a few more
 /// accepted while keys are changed.
@@ -46,7 +51,7 @@ pub const MAX_MESH_KEYS: usize = 4;
 pub const MAX_CHANNEL_KEYS: usize = 8;
 /// The longest record [`Settings::encode`] makes.
 pub const MAX_RECORD_LEN: usize =
-    HEADER_LEN + (MAX_MESH_KEYS + MAX_CHANNEL_KEYS) * 34 + 2 + 32 + CRC_LEN;
+    HEADER_LEN + (MAX_MESH_KEYS + MAX_CHANNEL_KEYS) * 34 + 2 + 32 + 2 + MAX_RADIO_LEN + CRC_LEN;
 
 /// What a node keeps between restarts, apart from its identity.
 #[derive(Debug, Default)]
@@ -58,6 +63,9 @@ pub struct Settings {
     pub name: String,
     /// At most [`MAX_CHANNEL_KEYS`] are kept.
     pub channel_keys: Vec<ChannelKey>,
+    /// Which radio to use, for platforms with a choice; empty for their
+    /// default. At most [`MAX_RADIO_LEN`] bytes are kept.
+    pub radio: String,
 }
 
 impl Settings {
@@ -77,6 +85,10 @@ impl Settings {
         }
         for key in self.channel_keys.iter().take(MAX_CHANNEL_KEYS) {
             entry(&mut record, CHANNEL_KEY, &key.0);
+        }
+        let radio = clip(&self.radio, MAX_RADIO_LEN);
+        if !radio.is_empty() {
+            entry(&mut record, RADIO, radio.as_bytes());
         }
         let len = (record.len() - HEADER_LEN) as u16;
         record[12..14].copy_from_slice(&len.to_be_bytes());
@@ -117,6 +129,10 @@ impl Settings {
                 (NAME, _) => {
                     settings.name = String::from(clip_name(&String::from_utf8_lossy(value)));
                 }
+                (RADIO, _) => {
+                    let radio = String::from_utf8_lossy(value);
+                    settings.radio = String::from(clip(&radio, MAX_RADIO_LEN));
+                }
                 _ => {}
             }
         }
@@ -125,6 +141,15 @@ impl Settings {
         }
         Some((generation, settings))
     }
+}
+
+/// `text` cut to at most `max` bytes, at a character boundary.
+fn clip(text: &str, max: usize) -> &str {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 fn entry(record: &mut Vec<u8>, kind: u8, value: &[u8]) {
@@ -154,6 +179,7 @@ mod tests {
             mesh_keys: vec![MeshKey::from_bytes([1; 32]), MeshKey::from_bytes([2; 32])],
             name: "roof".into(),
             channel_keys: vec![ChannelKey::from_bytes([3; 32])],
+            radio: "802.15.4:25".into(),
         }
     }
 
@@ -170,6 +196,7 @@ mod tests {
         let (generation, settings) = Settings::decode(&record).unwrap();
         assert_eq!(generation, 7);
         assert_eq!(settings.name, "roof");
+        assert_eq!(settings.radio, "802.15.4:25");
         let ids = |keys: &[MeshKey]| keys.iter().map(MeshKey::id).collect::<Vec<_>>();
         assert_eq!(ids(&settings.mesh_keys), ids(&sample().mesh_keys));
         assert_eq!(settings.channel_keys[0].id(), sample().channel_keys[0].id());
@@ -194,6 +221,7 @@ mod tests {
             mesh_keys: (0..9).map(|i| MeshKey::from_bytes([i; 32])).collect(),
             name: "x".repeat(40),
             channel_keys: (0..9).map(|i| ChannelKey::from_bytes([i; 32])).collect(),
+            radio: "r".repeat(20),
         };
         let record = full.encode(1);
         assert_eq!(record.len(), MAX_RECORD_LEN);
@@ -201,5 +229,6 @@ mod tests {
         assert_eq!(settings.mesh_keys.len(), MAX_MESH_KEYS);
         assert_eq!(settings.channel_keys.len(), MAX_CHANNEL_KEYS);
         assert_eq!(settings.name.len(), 32);
+        assert_eq!(settings.radio.len(), MAX_RADIO_LEN);
     }
 }

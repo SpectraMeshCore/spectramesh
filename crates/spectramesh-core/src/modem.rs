@@ -13,7 +13,7 @@
 //! | 0x01 | host to modem | Send: destination link address (6), then the frame        |
 //! | 0x02 | host to modem | Info request                                              |
 //! | 0x81 | modem to host | Received: source link address (6), RSSI in dBm (1, signed), then the frame |
-//! | 0x82 | modem to host | Info: protocol version (1), MTU (2), bitrate (4), channel (1), link address (6) |
+//! | 0x82 | modem to host | Info: protocol version (1), MTU (2), bitrate (4), channel (1), link address (6), radio (1: 0 ESP-NOW, 1 802.15.4) |
 //!
 //! The modem sends its info when it starts and whenever it's asked.
 
@@ -21,7 +21,8 @@ use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
 
-pub const PROTOCOL_VERSION: u8 = 1;
+/// Version 2 added the radio to the modem's info.
+pub const PROTOCOL_VERSION: u8 = 2;
 
 const SEND: u8 = 0x01;
 const INFO_REQUEST: u8 = 0x02;
@@ -56,6 +57,35 @@ pub struct ModemInfo {
     pub channel: u8,
     /// The modem's own link-layer address.
     pub address: [u8; 6],
+    pub radio: ModemRadio,
+}
+
+/// The radio a modem has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModemRadio {
+    EspNow,
+    /// IEEE 802.15.4, on [`ModemInfo::channel`].
+    Ieee802154,
+    /// A radio this version doesn't know.
+    Unknown(u8),
+}
+
+impl ModemRadio {
+    fn code(self) -> u8 {
+        match self {
+            ModemRadio::EspNow => 0,
+            ModemRadio::Ieee802154 => 1,
+            ModemRadio::Unknown(code) => code,
+        }
+    }
+
+    fn from_code(code: u8) -> Self {
+        match code {
+            0 => ModemRadio::EspNow,
+            1 => ModemRadio::Ieee802154,
+            other => ModemRadio::Unknown(other),
+        }
+    }
 }
 
 impl ToModem<'_> {
@@ -99,12 +129,13 @@ impl FromModem<'_> {
                 message
             }
             FromModem::Info(info) => {
-                let mut message = Vec::with_capacity(15);
+                let mut message = Vec::with_capacity(16);
                 message.extend_from_slice(&[INFO, info.version]);
                 message.extend_from_slice(&info.mtu.to_be_bytes());
                 message.extend_from_slice(&info.bitrate_bps.to_be_bytes());
                 message.push(info.channel);
                 message.extend_from_slice(&info.address);
+                message.push(info.radio.code());
                 message
             }
         }
@@ -119,12 +150,16 @@ impl<'a> FromModem<'a> {
                 rssi: rest[6] as i8,
                 frame: &rest[7..],
             }),
+            // Version 1 modems, which had only ESP-NOW, sent no radio.
             Some((&INFO, rest)) if rest.len() >= 14 => Ok(FromModem::Info(ModemInfo {
                 version: rest[0],
                 mtu: u16::from_be_bytes([rest[1], rest[2]]),
                 bitrate_bps: u32::from_be_bytes(rest[3..7].try_into().expect("4 bytes")),
                 channel: rest[7],
                 address: rest[8..14].try_into().expect("6 bytes"),
+                radio: rest
+                    .get(14)
+                    .map_or(ModemRadio::EspNow, |&code| ModemRadio::from_code(code)),
             })),
             Some((&RECEIVED | &INFO, _)) | None => Err(Error::Truncated),
             Some((&other, _)) => Err(Error::UnknownMessage(other)),
@@ -241,8 +276,18 @@ mod tests {
             bitrate_bps: 1_000_000,
             channel: 1,
             address: [9; 6],
+            radio: ModemRadio::Ieee802154,
         });
         assert_eq!(FromModem::decode(&info.encode()), Ok(info));
+        // A version 1 modem's info, without the radio, means ESP-NOW.
+        let old = &info.encode()[..15];
+        assert!(matches!(
+            FromModem::decode(old),
+            Ok(FromModem::Info(ModemInfo {
+                radio: ModemRadio::EspNow,
+                ..
+            }))
+        ));
         assert_eq!(FromModem::decode(&[0x99]), Err(Error::UnknownMessage(0x99)));
         assert_eq!(FromModem::decode(&[RECEIVED, 1]), Err(Error::Truncated));
     }
