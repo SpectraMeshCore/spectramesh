@@ -158,7 +158,11 @@ pub fn run(
                 thread::spawn(move || receive(id, &device, &socket, &inbox));
             }
             Reader::Modem(reader) => {
-                thread::spawn(move || receive_modem(id, &device, reader, &inbox));
+                let Link::Modem(modem) = &hue.link else {
+                    unreachable!("a modem reader comes with a modem link")
+                };
+                let modem = modem.clone();
+                thread::spawn(move || receive_modem(id, &device, &modem, reader, &inbox));
             }
             Reader::Udp(reader) => {
                 thread::spawn(move || receive_udp(id, &device, &reader, &inbox));
@@ -455,7 +459,18 @@ fn read_tun(mut tun: Tun, inbox: &mpsc::Sender<Event>) {
     }
 }
 
-fn receive_modem(hue: HueId, device: &str, mut reader: ModemReader, inbox: &mpsc::Sender<Event>) {
+/// How often to try a modem that disappeared again.
+const MODEM_RETRY: Duration = Duration::from_secs(2);
+
+/// Reads frames from a modem. When it disappears, as when it's unplugged or
+/// the computer sleeps, waits for it to come back and carries on.
+fn receive_modem(
+    hue: HueId,
+    device: &str,
+    modem: &Modem,
+    mut reader: ModemReader,
+    inbox: &mpsc::Sender<Event>,
+) {
     loop {
         match reader.recv() {
             Ok((src_mac, frame, rssi)) => {
@@ -472,8 +487,19 @@ fn receive_modem(hue: HueId, device: &str, mut reader: ModemReader, inbox: &mpsc
                 }
             }
             Err(err) => {
-                error!("reading modem {device} failed: {err}");
-                return;
+                warn!("modem {device}: {err}; waiting for it to come back");
+                reader = loop {
+                    thread::sleep(MODEM_RETRY);
+                    match modem.reopen(device) {
+                        Ok(reader) => break reader,
+                        Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+                            error!("modem {device}: {err}");
+                            return;
+                        }
+                        Err(_) => {}
+                    }
+                };
+                info!("modem {device} is back");
             }
         }
     }

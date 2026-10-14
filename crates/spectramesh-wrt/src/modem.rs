@@ -90,6 +90,25 @@ impl Modem {
         ))
     }
 
+    /// Opens the modem at `path` again, after it disappeared (unplugged, or
+    /// reset when the computer slept), and returns a new reader for it.
+    /// Sending goes to the new port from then on.
+    pub fn reopen(&self, path: &str) -> io::Result<ModemReader> {
+        let (fresh, reader) = Modem::open(path)?;
+        if fresh.info.radio != self.info.radio {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{path} now has a different radio; restart spectrameshd to use it"),
+            ));
+        }
+        let port = fresh
+            .port
+            .into_inner()
+            .expect("no panics while holding the port");
+        *self.port.lock().expect("no panics while holding the port") = port;
+        Ok(reader)
+    }
+
     /// Sends a SpectraMesh frame to `dst` over the modem's radio.
     pub fn send(&self, dst: Mac, frame: &[u8]) -> io::Result<()> {
         self.write(ToModem::Send { dst, frame })
@@ -130,9 +149,42 @@ impl Modem {
 
 impl ModemReader {
     /// Reads what's available (waiting at most a tenth of a second) and
-    /// returns the complete messages.
+    /// returns the complete messages. Fails if the port has gone, as when
+    /// the modem is unplugged.
     pub fn read_messages(&mut self) -> io::Result<Vec<Vec<u8>>> {
+        // A port that's gone reads as empty, like one with nothing to read,
+        // so ask whether it hung up first.
+        let mut poll = libc::pollfd {
+            fd: self.port.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `poll` is a valid pollfd for an open descriptor.
+        let ready = unsafe { libc::poll(&mut poll, 1, 100) };
+        if ready < 0 {
+            let err = io::Error::last_os_error();
+            return match err.kind() {
+                io::ErrorKind::Interrupted => Ok(Vec::new()),
+                _ => Err(err),
+            };
+        }
+        if poll.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the modem disconnected",
+            ));
+        }
+        if poll.revents & libc::POLLIN == 0 {
+            return Ok(Vec::new());
+        }
         let len = match self.port.read(&mut self.buf) {
+            // Readable but empty: the other end has gone.
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "the modem disconnected",
+                ));
+            }
             Ok(len) => len,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => 0,
             Err(err) => return Err(err),
