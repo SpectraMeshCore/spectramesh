@@ -64,7 +64,7 @@ ESP-NOW nodes and 802.15.4 nodes can't hear each other. A node with both radios 
 
 | Command | Effect |
 |---|---|
-| `info` | Node ID, name, uptime, boot count, neighbors, channels and routes |
+| `info` | Node ID, name, uptime, boot count, free heap, hues, neighbors, channels and routes |
 | `send NODE TEXT` | Sends a message to one node, encrypted end to end |
 | `channel CHANNEL TEXT` | Sends a message on a joined channel (the start of its ID is enough) |
 | `mesh-keys KEY...`, `name [NAME]`, `channel-keys [KEY...]` | Saves settings, applied at the next restart. Keys are never printed back |

@@ -1,6 +1,7 @@
 //! The router's end-to-end side: finding other nodes' keys, setting up
 //! sessions, and encrypting unicast data. See [`session`](crate::session).
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::time::Duration;
 
@@ -63,6 +64,7 @@ impl Router {
         let index = *self.current_sessions.get(&peer)?;
         self.sessions
             .get_mut(&index)
+            .map(|s| &mut **s)
             .filter(|s| s.confirmed && !s.is_expired(now))
     }
 
@@ -89,7 +91,7 @@ impl Router {
                 initiation.attempts = attempts;
                 let node = peer.node_id();
                 self.send_end_to_end(node, &message);
-                self.initiations.insert(node, initiation);
+                self.initiations.insert(node, Box::new(initiation));
             }
             // Only fails on keys that aren't valid curve points.
             Err(_) => {
@@ -236,7 +238,7 @@ impl Router {
                     session::respond(&self.identity, origin, sender, noise, index, seed, now)?;
                 self.remember_identity(session.peer, now);
                 self.limit_sessions(origin);
-                self.sessions.insert(index, session);
+                self.sessions.insert(index, Box::new(session));
                 self.send_end_to_end(origin, &response);
             }
             Message::Response {
@@ -255,7 +257,7 @@ impl Router {
                 let session = initiation.complete(sender, noise, now)?;
                 let index = session.index;
                 self.limit_sessions(origin);
-                self.sessions.insert(index, session);
+                self.sessions.insert(index, Box::new(session));
                 self.current_sessions.insert(origin, index);
                 self.flush_waiting(origin, true, now);
             }

@@ -17,6 +17,7 @@ mod channels;
 mod e2e;
 mod proofs;
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -173,10 +174,14 @@ pub struct Router {
     identities: BTreeMap<NodeId, (PublicIdentity, Instant)>,
     identity_requests: BTreeMap<NodeId, e2e::IdentityRequest>,
     /// End-to-end sessions, by this node's index for them.
-    sessions: BTreeMap<u32, Session>,
+    ///
+    /// Sessions and handshakes are boxed: a map node holds up to 11 values
+    /// inline, which for handshakes (about 900 bytes each) would be one
+    /// 10 KB allocation, too big for a fragmented microcontroller heap.
+    sessions: BTreeMap<u32, Box<Session>>,
     /// The session each peer's data goes out on.
     current_sessions: BTreeMap<NodeId, u32>,
-    initiations: BTreeMap<NodeId, Initiation>,
+    initiations: BTreeMap<NodeId, Box<Initiation>>,
     /// Data held for each destination while a session is set up.
     waiting: BTreeMap<NodeId, VecDeque<Vec<u8>>>,
     reassembly: Reassembly,

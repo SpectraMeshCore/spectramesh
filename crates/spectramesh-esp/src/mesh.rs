@@ -168,14 +168,17 @@ fn answer(router: &mut Router, request: Request) {
         Request::Info => {
             let status = router.status(now());
             println!(
-                "ok node {} {:?}, up {} s, boot {}, last start {:?}, {} neighbor links, {} routes",
+                "ok node {} {:?}, up {} s, boot {}, last start {:?}, {} neighbor links, {} routes, \
+                 heap {} of {} bytes free",
                 router.id(),
                 router.name(),
                 status.uptime.as_secs(),
                 status.boots.unwrap_or(0),
                 status.reset,
                 router.neighbors().len(),
-                router.routes().count()
+                router.routes().count(),
+                esp_alloc::HEAP.free(),
+                esp_alloc::HEAP.free() + esp_alloc::HEAP.used(),
             );
             for hue in (0..=u8::MAX).filter_map(|id| router.hue(HueId(id))) {
                 println!(

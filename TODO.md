@@ -5,9 +5,9 @@ Work that's written but waiting on hardware, or on a decision.
 ## Waiting on you
 
 - [x] **Hardware tests on the XIAO ESP32-C6 boards** (2026-10-12 to 14, xiao-1 and the USB modem). Working: keys in flash and `--provision`, the console, the new partition table keeping identities, reset cause and boot count on the map, 600-byte messages over ESP-NOW v2, direct and channel messages both ways over ESP-NOW and over 802.15.4, and a node on the new firmware meshing with xiao-2's older firmware. Fixed along the way: proofs lost on 802.15.4, bursts lost on 802.15.4, settings not saving, `--provision` not being heard, and the daemon not reopening a modem after the laptop slept.
-- [ ] **Reflash xiao-2** and give it its keys (`--provision`); it still runs firmware with the mesh key built in.
+- [x] **xiao-2 reflashed and provisioned** (2026-10-14). Its first direct message crashed it: the router asked for a 9 KB block for its handshake table, and the 64 KiB heap was nearly full. Handshakes and sessions are now boxed and the heap is 160 KiB; `info` shows what's free. The crash also showed restart-after-panic working, and "Panic" as the last start.
+- [ ] **Reflash xiao-1** with the larger heap when it's next plugged in; it runs the 64 KiB build and could hit the same crash. Its keys stay in flash, so no `--provision` is needed.
 - [ ] **A fourth board, to bridge ESP-NOW and 802.15.4 on hardware**: the laptop with one modem of each kind, plus a node on each hue. Three boards can't show it (tests/multi_hue.rs shows it with UDP hues).
-- [ ] **Not yet seen on hardware**: a restart after a panic (and "panic" on the map).
 - [ ] **Choose a 915 MHz board.** The SX1262 driver (`crates/spectramesh-sx126x`) and its hue (`crates/spectramesh-esp/src/sub_ghz.rs`) need the board's pins. Most ESP32 boards with an SX1262 (Heltec WiFi LoRa 32 V3, LilyGO T-Beam S3) use the ESP32-S3, which needs Espressif's Xtensa toolchain (`espup`).
 
 ## Also waiting

@@ -108,7 +108,11 @@ async fn main(spawner: Spawner) -> ! {
         Output::new(peripherals.GPIO14, Level::Low, OutputConfig::default()),
     );
 
+    // The RAM the bootloader used, and more besides: the router keeps
+    // sessions, handshakes, fragments and the mesh map on the heap, and
+    // 64 KiB ran out with two neighbors.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 65536);
+    esp_alloc::heap_allocator!(size: 96 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
