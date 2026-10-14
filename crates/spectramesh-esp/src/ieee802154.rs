@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
-use embassy_time::{Duration, with_timeout};
+use embassy_time::{Duration, Timer, with_timeout};
 use esp_radio::ieee802154::{Config, Frame, Ieee802154};
 use ieee802154::mac::{
     Address, ExtendedAddress, FrameContent, FrameType, FrameVersion, Header, PanId, ShortAddress,
@@ -40,6 +40,13 @@ pub const PAN_ID: u16 = 0x534D;
 pub const MTU: usize = 127 - 15 - 2;
 
 const BITRATE_BPS: u64 = 250_000;
+
+/// The pause after each frame sent. Reading what the radio received makes
+/// esp-radio (1.0.0-beta.1) restart reception, losing any frame that has
+/// started arriving, so a receiver needs a moment to take one frame before
+/// the next begins. Without it, a burst such as a fragmented routing
+/// message lost all but its first frame.
+const FRAME_GAP: Duration = Duration::from_millis(5);
 
 /// Transmit power in dBm: the C6's most for 802.15.4.
 const TX_POWER_DBM: i8 = 20;
@@ -178,6 +185,7 @@ impl Link {
             }
         }
         self.radio.start_receive();
+        Timer::after(FRAME_GAP).await;
     }
 }
 

@@ -146,7 +146,7 @@ The Xtensa chips (the original ESP32 and the S3) need Espressif's toolchain from
 
 ## Protecting the keys on a board
 
-The node's secret and the mesh keys sit in the `spectramesh` partition. Anyone holding a board can read its flash over USB, so on its own the partition protects nothing. The ESP32-C6 can encrypt its flash with a key in its eFuses that software can't read, and the partition is already flagged `encrypted`. The firmware reads and writes it the same way either way, so nothing changes in the code when encryption is turned on.
+The node's secret and the mesh keys sit in the `spectramesh` partition. Anyone holding a board can read its flash over USB, so on its own the partition protects nothing. The ESP32-C6 can encrypt its flash with a key in its eFuses that software can't read, and the firmware reads and writes the partition the same way either way. The partition must also be flagged `encrypted`, which it can't be yet: esp-bootloader-esp-idf 0.6.0 reads that flag as read-only (see `partitions.csv`).
 
 Turning it on takes **eFuse burns, which can never be undone**. Try it on a spare board first. The plan, not yet tried on hardware:
 

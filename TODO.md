@@ -16,6 +16,6 @@ Work that's written but waiting on hardware, or on a decision.
 
 ## Also waiting
 
-- [ ] **Flash encryption**: burns eFuses, which can't be undone. Needs a go-ahead and a spare board. Plan: `crates/spectramesh-esp/README.md`, "Protecting the keys on a board".
+- [ ] **Flash encryption**: burns eFuses, which can't be undone. Needs a go-ahead and a spare board. Plan: `crates/spectramesh-esp/README.md`, "Protecting the keys on a board". It also needs the `spectramesh` partition flagged `encrypted` again, which waits on a fix to esp-bootloader-esp-idf: 0.6.0 reads the `encrypted` flag bit as read-only (see `crates/spectramesh-esp/partitions.csv`).
 - [ ] **OpenWRT**: the router models, for an SDK build in CI and a test of the init script.
 - [ ] **ESP-NOW and 802.15.4 on one ESP32-C6**: esp-radio can't run both yet. Until it can, a node with both is a computer with two USB modems.

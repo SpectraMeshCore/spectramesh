@@ -53,9 +53,19 @@ pub fn run(port: &str, provision: &Provision<'_>) -> io::Result<()> {
             .map_err(|err| io::Error::new(err.kind(), format!("{port}: {err}")))?,
         pending: Vec::new(),
     };
-    // End anything half typed, then ask who it is.
+    // The ESP32's USB serial port drops what arrives just after the port
+    // opens, so wait a moment, then ask who it is until it answers. The
+    // first newline ends anything half typed.
+    std::thread::sleep(Duration::from_millis(300));
     console.port.write_all(b"\n")?;
-    let info = console.command("info").map_err(|err| {
+    let mut info = Err(io::Error::new(io::ErrorKind::TimedOut, "no answer"));
+    for _ in 0..5 {
+        info = console.command_within("info", Duration::from_secs(1));
+        if info.is_ok() {
+            break;
+        }
+    }
+    let info = info.map_err(|err| {
         io::Error::new(
             err.kind(),
             format!("{port}: {err}; is the spectramesh-esp firmware running on it?"),
@@ -84,8 +94,13 @@ impl Console {
     /// Sends a command and waits for its answer, skipping log lines.
     /// Returns the answer after `ok`.
     fn command(&mut self, command: &str) -> io::Result<String> {
+        self.command_within(command, ANSWER_TIMEOUT)
+    }
+
+    /// Like [`command`](Self::command), waiting at most `timeout`.
+    fn command_within(&mut self, command: &str, timeout: Duration) -> io::Result<String> {
         self.port.write_all(format!("{command}\n").as_bytes())?;
-        let deadline = Instant::now() + ANSWER_TIMEOUT;
+        let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             let Some(line) = self.read_line()? else {
                 continue;

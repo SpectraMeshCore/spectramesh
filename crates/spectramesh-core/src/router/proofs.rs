@@ -27,12 +27,21 @@ use crate::time::Instant;
 /// How long to wait before asking the same destination's proof again.
 const PROOF_REQUEST_HOLD: Duration = Duration::from_secs(1);
 
+/// How long to keep a proof for a destination with no route yet. On small
+/// hues, a proof arrives in fragments, in a frame of its own, and the update
+/// it covers comes in the next frame.
+const UNROUTED_PROOF_HOLD: Duration = Duration::from_secs(30);
+/// The most proofs to keep for destinations with no route, so a member can't
+/// fill memory with proofs for made-up nodes.
+const MAX_UNROUTED_PROOFS: usize = 32;
+
 /// The newest proven seqno for a destination.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Proof {
     seqno: u16,
     keys: PublicIdentity,
     signature: [u8; 64],
+    received: Instant,
 }
 
 /// What a node signs to issue `seqno` for its own route.
@@ -94,6 +103,7 @@ impl Router {
                 seqno,
                 keys,
                 signature,
+                received: now,
             },
         );
         // The keys are verified now, so they can open sessions too.
@@ -119,11 +129,25 @@ impl Router {
         self.send_control(hue, neighbor, &[Tlv::RouteRequest { dest }]);
     }
 
-    /// Forgets proofs for destinations no longer in the route table.
+    /// Forgets proofs for destinations no longer in the route table, once
+    /// they've had time for their update to arrive.
     pub(super) fn expire_proofs(&mut self, now: Instant) {
         let routes = &self.routes;
+        let routed = |dest: &NodeId| routes.for_dest(*dest).next().is_some();
         self.proofs
-            .retain(|dest, _| routes.for_dest(*dest).next().is_some());
+            .retain(|dest, proof| routed(dest) || now < proof.received + UNROUTED_PROOF_HOLD);
+        let mut unrouted: alloc::vec::Vec<(Instant, NodeId)> = self
+            .proofs
+            .iter()
+            .filter(|(dest, _)| !routed(dest))
+            .map(|(dest, proof)| (proof.received, *dest))
+            .collect();
+        if unrouted.len() > MAX_UNROUTED_PROOFS {
+            unrouted.sort();
+            for (_, dest) in &unrouted[..unrouted.len() - MAX_UNROUTED_PROOFS] {
+                self.proofs.remove(dest);
+            }
+        }
         self.proof_requests
             .retain(|_, &mut at| now < at + PROOF_REQUEST_HOLD);
     }
@@ -132,6 +156,33 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proofs_without_routes_are_kept_briefly_and_capped() {
+        use crate::auth::{KeyRing, MeshKey};
+        use crate::identity::Identity;
+        let keys = KeyRing::new(&MeshKey::from_bytes([1; 32]));
+        let mut router = Router::new(
+            Identity::from_secret([2; 32]),
+            keys,
+            Default::default(),
+            [3; 32],
+        );
+        let start = Instant::default();
+        for i in 0..40u8 {
+            let identity = Identity::from_secret([i + 10; 32]);
+            let signature = identity.sign(&seqno_message(identity.node_id(), 1));
+            let at = start + Duration::from_millis(u64::from(i));
+            router.handle_seqno_proof(*identity.public(), 1, signature, at);
+        }
+        router.expire_proofs(start + Duration::from_secs(1));
+        assert_eq!(router.proofs.len(), MAX_UNROUTED_PROOFS);
+        // The newest are kept.
+        let newest = Identity::from_secret([49; 32]).node_id();
+        assert!(router.is_proven(newest, 1));
+        router.expire_proofs(start + UNROUTED_PROOF_HOLD + Duration::from_secs(1));
+        assert!(router.proofs.is_empty());
+    }
 
     #[test]
     fn seqno_messages_name_node_and_seqno() {

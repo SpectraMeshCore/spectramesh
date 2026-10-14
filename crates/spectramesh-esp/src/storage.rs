@@ -13,9 +13,10 @@
 //! flashed with the default partition table kept their identity in its first
 //! sector, so they keep it now. (Flashing an ESP-IDF app afterwards erases it.)
 //!
-//! The partition is flagged `encrypted`. Until flash encryption is turned on
-//! in the chip's eFuses, that changes nothing; once it is, the records are
-//! stored encrypted, and a stolen board's flash gives away no keys.
+//! Once flash encryption is on and the partition is flagged `encrypted`, the
+//! records are stored encrypted, and a stolen board's flash gives away no
+//! keys; reads and writes here stay the same. The flag is off for now: see
+//! `partitions.csv`.
 
 use esp_bootloader_esp_idf::partitions::{
     self, DataPartitionSubType, FlashRegion, FlashStorage, PARTITION_TABLE_MAX_LEN, PartitionType,

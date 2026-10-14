@@ -1076,6 +1076,9 @@ mod tests {
                                 Ok(_) | Err(Error::Unverified | Error::NoSession) => {}
                                 Err(err) => panic!("router {peer} rejected a frame: {err}"),
                             }
+                            // Platforms poll after every frame, so the next
+                            // frame may find timed work done in between.
+                            routers[peer].poll(now);
                         }
                     }
                 }

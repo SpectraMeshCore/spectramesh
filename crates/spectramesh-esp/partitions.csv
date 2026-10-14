@@ -1,9 +1,13 @@
 # SpectraMesh's partition table: espflash's default, with the `nvs` partition
 # replaced by `spectramesh` at the same place, for the node's identity,
-# settings and boot count (see src/storage.rs). It's flagged encrypted, so
-# once flash encryption is turned on, the keys in it are encrypted too.
+# settings and boot count (see src/storage.rs).
+#
+# It should be flagged `encrypted`, so that flash encryption covers the keys
+# in it, but esp-bootloader-esp-idf 0.6.0 reads that flag (bit 0, as ESP-IDF
+# and espflash write it) as read-only, and the firmware couldn't save its
+# settings. Add it back once that's fixed, before turning flash encryption on.
 #
 # Name,       Type, SubType,   Offset,  Size,     Flags
-spectramesh,  data, undefined, 0x9000,  0x6000,   encrypted
+spectramesh,  data, undefined, 0x9000,  0x6000,
 phy_init,     data, phy,       0xf000,  0x1000,
 factory,      app,  factory,   0x10000, 0x3f0000,
