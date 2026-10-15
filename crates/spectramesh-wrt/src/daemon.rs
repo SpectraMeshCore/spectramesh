@@ -22,7 +22,7 @@ use spectramesh_core::{Delivery, Error, HueId, Instant, MAX_PAYLOAD, NodeId, Rou
 
 use crate::control::{self, Command, Request};
 use crate::icmp;
-use crate::link::{BROADCAST_MAC, EthernetSocket, LinkAddr};
+use crate::link::{BROADCAST_MAC, Device, EthernetSocket, LinkAddr};
 use crate::modem::{Modem, ModemReader};
 use crate::tun::{Prefix, Tun, addresses};
 use crate::udp::{UdpLink, UdpReader};
@@ -97,6 +97,9 @@ struct Sender {
     id: HueId,
     device: String,
     link: Link,
+    /// Whether the last send failed, so a device that's gone is logged once,
+    /// not for every frame.
+    failing: bool,
 }
 
 enum Event {
@@ -172,9 +175,10 @@ pub fn run(
             id: hue.id,
             device: hue.device,
             link: hue.link,
+            failing: false,
         });
     }
-    let hues = senders;
+    let mut hues = senders;
     // Names for the map: device names, and something shorter for modems'
     // serial port paths.
     let hue_names: Vec<(u8, String)> = hues
@@ -270,7 +274,7 @@ pub fn run(
 
         router.poll(now());
         while let Some(tx) = router.poll_transmit() {
-            let Some(hue) = hues.iter().find(|h| h.id == tx.hue) else {
+            let Some(hue) = hues.iter_mut().find(|h| h.id == tx.hue) else {
                 warn!("no socket for hue {}", tx.hue.0);
                 continue;
             };
@@ -283,8 +287,17 @@ pub fn run(
                 .iter()
                 .filter(|((hue, _), _)| *hue == tx.hue)
                 .map(|(_, address)| *address);
-            if let Err(err) = hue.link.send(dst, learned, &tx.frame) {
-                warn!("sending on {} failed: {err}", hue.device);
+            match hue.link.send(dst, learned, &tx.frame) {
+                Ok(()) if hue.failing => {
+                    info!("sending on {} works again", hue.device);
+                    hue.failing = false;
+                }
+                Ok(()) => {}
+                Err(err) if hue.failing => debug!("sending on {} failed: {err}", hue.device),
+                Err(err) => {
+                    warn!("sending on {} failed: {err}", hue.device);
+                    hue.failing = true;
+                }
             }
         }
         while let Some(delivery) = router.poll_delivery() {
@@ -462,6 +475,9 @@ fn read_tun(mut tun: Tun, inbox: &mpsc::Sender<Event>) {
 /// How often to try a modem that disappeared again.
 const MODEM_RETRY: Duration = Duration::from_secs(2);
 
+/// How often to look for a network device that disappeared or went down.
+const DEVICE_RETRY: Duration = Duration::from_secs(2);
+
 /// Reads frames from a modem. When it disappears, as when it's unplugged or
 /// the computer sleeps, waits for it to come back and carries on.
 fn receive_modem(
@@ -527,10 +543,30 @@ fn receive(hue: HueId, device: &str, socket: &EthernetSocket, inbox: &mpsc::Send
             Ok(None) => {}
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
             Err(err) => {
-                error!("receiving on {device} failed: {err}");
-                return;
+                warn!("{device}: {err}; waiting for it to come back");
+                await_device(device, socket);
             }
         }
+    }
+}
+
+/// Waits until a hue's device, gone or taken down, is up again, and moves
+/// its socket to a new device of the same name.
+fn await_device(device: &str, socket: &EthernetSocket) {
+    loop {
+        thread::sleep(DEVICE_RETRY);
+        if !Device::open(device).is_ok_and(|d| d.up) {
+            continue;
+        }
+        match socket.reattach() {
+            Ok(true) => info!("{device} is back, as a new device"),
+            Ok(false) => info!("{device} is back"),
+            Err(err) => {
+                debug!("{device}: {err}");
+                continue;
+            }
+        }
+        return;
     }
 }
 

@@ -46,18 +46,27 @@ impl UdpLink {
             socket: socket.try_clone()?,
         };
         let ipv6 = socket.local_addr()?.is_ipv6();
-        let resolved = Arc::new(Mutex::new(resolve(&peers, ipv6).0));
+        let (addresses, mut complete) = resolve(&peers, ipv6);
+        if !peers.is_empty() {
+            log_peers(&addresses);
+        }
+        let resolved = Arc::new(Mutex::new(addresses));
         if !peers.is_empty() {
             let resolved = resolved.clone();
             thread::spawn(move || {
                 loop {
-                    let (addresses, complete) = resolve(&peers, ipv6);
                     thread::sleep(if complete {
                         RESOLVE_INTERVAL
                     } else {
                         RETRY_INTERVAL
                     });
-                    *resolved.lock().expect("no panics while holding it") = addresses;
+                    let addresses;
+                    (addresses, complete) = resolve(&peers, ipv6);
+                    let mut current = resolved.lock().expect("no panics while holding it");
+                    if *current != addresses {
+                        log_peers(&addresses);
+                        *current = addresses;
+                    }
                 }
             });
         }
@@ -119,17 +128,18 @@ fn resolve(peers: &[String], ipv6: bool) -> (Vec<SocketAddr>, bool) {
     }
     addresses.sort();
     addresses.dedup();
-    if !peers.is_empty() && complete {
-        info!(
-            "UDP peers: {}",
-            addresses
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
     (addresses, complete)
+}
+
+fn log_peers(addresses: &[SocketAddr]) {
+    info!(
+        "UDP peers: {}",
+        addresses
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 }
 
 /// `address` as a socket of the given family sends to it: IPv4 addresses

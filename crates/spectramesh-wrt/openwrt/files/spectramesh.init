@@ -8,6 +8,10 @@ PROG=/usr/sbin/spectrameshd
 KEY_FILE=/var/run/spectramesh/mesh.key
 CHANNEL_FILE=/var/run/spectramesh/channels.key
 
+add_peer() {
+	spec="$spec,peer=$1"
+}
+
 add_hue() {
 	local cfg="$1" device kind bitrate freq mtu spec
 
@@ -22,6 +26,7 @@ add_hue() {
 	[ -n "$bitrate" ] && spec="$spec,bitrate=$bitrate"
 	[ -n "$freq" ] && spec="$spec,freq=$freq"
 	[ -n "$mtu" ] && spec="$spec,mtu=$mtu"
+	config_list_foreach "$cfg" peer add_peer
 	procd_append_param command --hue "$spec"
 }
 
@@ -34,7 +39,7 @@ write_channel_key() {
 }
 
 start_service() {
-	local enabled identity
+	local enabled identity name web tun ipv6_prefix
 
 	config_load spectramesh
 	config_get_bool enabled main enabled 0
@@ -55,12 +60,18 @@ start_service() {
 	[ -s "$CHANNEL_FILE" ] && procd_append_param command --channel-key-file "$CHANNEL_FILE"
 	config_get identity main identity /etc/spectramesh/node.key
 	procd_append_param command --identity "$identity"
+	config_get name main name
+	[ -n "$name" ] && procd_append_param command --name "$name"
+	config_get web main web
+	[ -n "$web" ] && procd_append_param command --web "$web"
 	config_get tun main tun
 	[ -n "$tun" ] && procd_append_param command --tun "$tun"
 	config_get ipv6_prefix main ipv6_prefix
 	[ -n "$ipv6_prefix" ] && procd_append_param command --ipv6-prefix "$ipv6_prefix"
 	config_foreach add_hue hue
-	procd_set_param respawn
+	# Keep trying: at boot, a USB or Wi-Fi device can appear after the
+	# daemon first starts, which then fails until it does.
+	procd_set_param respawn 3600 5 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance

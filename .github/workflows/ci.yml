@@ -68,6 +68,38 @@ jobs:
         env:
           RUSTFLAGS: ""
 
+  openwrt:
+    name: OpenWRT daemon (ramips/mt7621)
+    runs-on: ubuntu-24.04
+    env:
+      SDK_URL: https://downloads.openwrt.org/releases/24.10.1/targets/ramips/mt7621
+      SDK: openwrt-sdk-24.10.1-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64
+      # MIPS is a tier 3 Rust target, so its standard library is built from
+      # source, which needs nightly.
+      RUST_NIGHTLY: nightly-2026-10-01
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install "$RUST_NIGHTLY" --profile minimal --component rust-src --no-self-update
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: The SDK's C toolchain
+        run: |
+          mkdir -p sdk && cd sdk
+          curl -sSfLO "$SDK_URL/$SDK.tar.zst"
+          curl -sSfL "$SDK_URL/sha256sums" | grep " \*$SDK.tar.zst$" | sha256sum -c -
+          tar --zstd -xf "$SDK.tar.zst" --wildcards "$SDK/staging_dir/toolchain-*" "$SDK/staging_dir/host/lib"
+          rm "$SDK.tar.zst"
+      - run: crates/spectramesh-wrt/scripts/cross-build.sh "sdk/$SDK"
+      - run: |
+          mkdir -p openwrt
+          cp target/openwrt/spectrameshd-mipsel_24kc openwrt/spectrameshd
+          cp crates/spectramesh-wrt/openwrt/files/spectramesh.init openwrt/
+          cp crates/spectramesh-wrt/openwrt/files/spectramesh.config openwrt/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: openwrt-ramips-mt7621
+          path: openwrt
+
   esp:
     name: ESP32 firmware
     runs-on: ubuntu-24.04

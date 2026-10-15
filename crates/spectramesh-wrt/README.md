@@ -23,6 +23,8 @@ Wired links use the reliable link model and radio links the lossy one (see the c
 
 Each Ethernet frame starts with a 2-byte length, because Ethernet pads short frames. Frames for a known neighbor are sent to its MAC address, which on Wi-Fi gets link-layer acknowledgements and retries. Everything else is broadcast.
 
+Hues follow their device by name. If it's taken down, or deleted and created again (as `wifi up` and `ifup` do to Wi-Fi interfaces), the hue waits for it and carries on, logging once rather than for every frame. A device must exist when the daemon starts; on OpenWRT, procd restarts the daemon until it does.
+
 ## Running on any Linux machine
 
 ```
@@ -112,13 +114,25 @@ Node IDs are random, because each run creates new keys.
 
 The same scenario runs as a test: `cargo test -p spectramesh-wrt -- --ignored`.
 
-`tests/udp.rs` runs three daemons linked by UDP on this host, with no privileges: two spokes that only know a hub's address, and the hub, which learns them. The spokes route to each other through the hub and exchange a message. `tests/multi_hue.rs` (ignored by default; about 20 seconds) gives the hub two hues, one to each of two nodes that also share a slow third hue: their routes change hue at the hub, and fall back to the slow hue when the hub stops.
+`tests/udp.rs` runs three daemons linked by UDP on this host, with no privileges: two spokes that only know a hub's address, and the hub, which learns them. The spokes route to each other through the hub and exchange a message. `tests/multi_hue.rs` (ignored by default; about 20 seconds) gives the hub two hues, one to each of two nodes that also share a slow third hue: their routes change hue at the hub, and fall back to the slow hue when the hub stops. `tests/reattach.rs` (ignored; about 35 seconds; user namespaces) joins two daemons with a veth pair, deletes it and creates it again, then takes one end down and up, and checks the route returns each time.
 
 ## OpenWRT
 
-> The package hasn't been built in the OpenWRT SDK or run on a router yet. Expect fixes.
+> Tested on a HiLink HLK-7621 (MT7621, `ramips/mt7621`, OpenWRT 24.10.1) with the binary built as below and the init script and UCI config from `openwrt/files`: it runs under procd in about 2.5 MB of RAM, over an 802.11s interface on a USB Wi-Fi adapter, the LAN bridge and UDP. The package Makefile hasn't been built in the SDK yet.
 
-### Building
+### Building without the package
+
+`scripts/cross-build.sh` builds `spectrameshd` with the C toolchain from your router's [OpenWRT SDK](https://downloads.openwrt.org/releases/), skipping the SDK's own Rust build, which takes an hour. Download and unpack the SDK for your router's target, then:
+
+```
+crates/spectramesh-wrt/scripts/cross-build.sh ~/openwrt-sdk-24.10.1-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64
+```
+
+It prints where the stripped binary landed (`target/openwrt/spectrameshd-<arch>`). MIPS routers need a nightly Rust with `rust-src` (`rustup toolchain install nightly --component rust-src`), because Rust has no prebuilt standard library for MIPS; ARM and x86 routers build with stable. CI builds one for `ramips/mt7621` on every push, as the `openwrt-ramips-mt7621` artifact, with the init script and config.
+
+To install it by hand, copy the binary to `/usr/sbin/spectrameshd`, `files/spectramesh.init` to `/etc/init.d/spectramesh` and `files/spectramesh.config` to `/etc/config/spectramesh`, then configure it as below and run `/etc/init.d/spectramesh enable`. Use `scp -O` with OpenWRT's dropbear, which has no SFTP server.
+
+### Building the package
 
 Add this repository as a feed in your OpenWRT tree's `feeds.conf`. The `packages` feed is needed too, for Rust:
 
@@ -156,7 +170,7 @@ config hue
 	option bitrate '100M'
 ```
 
-Add `option tun 'smesh0'` to the `main` section to carry IPv6, and set `option ipv6_prefix` to keep addresses stable when the mesh key changes. Add `list channel_key 'smc1-...'` lines to join channels. Then `service spectramesh start`, and watch it with `logread -f`.
+Set `option name` for the map, and `option web '192.168.1.1:8470'` to serve the map on the LAN. A UDP hue takes its address as `device`, with `option kind 'udp'` and a `list peer 'HOST:PORT'` for each peer. Add `option tun 'smesh0'` to the `main` section to carry IPv6 (it needs `kmod-tun`), and set `option ipv6_prefix` to keep addresses stable when the mesh key changes. Add `list channel_key 'smc1-...'` lines to join channels. Then `service spectramesh start`, and watch it with `logread -f`.
 
 The TUN device isn't in any firewall zone until you add it. To control what can reach the router over the mesh, put `smesh0` in a zone: for example, an interface with `option device 'smesh0'` and `option proto 'none'` in `/etc/config/network`, added to a zone in `/etc/config/firewall`.
 
@@ -184,7 +198,7 @@ config interface 'spectramesh'
 	option proto 'none'
 ```
 
-Encrypted mesh needs a full `wpad` package (such as `wpad-mbedtls`) instead of the default `wpad-basic`. Find the device name with `ip link` after `wifi reload`; recent releases call it something like `phy1-mesh0`.
+USB adapters need their driver: a Netgear WNA1100 or other Atheros AR9271 adapter, for example, needs `kmod-ath9k-htc` (which brings its firmware), and supports mesh mode. Encrypted mesh needs a full `wpad` package (such as `wpad-mbedtls`) instead of the default `wpad-basic`. Find the device name with `ip link` after `wifi reload`; recent releases call it something like `phy1-mesh0`.
 
 ## How it's organized
 
@@ -202,6 +216,7 @@ Encrypted mesh needs a full `wpad` package (such as `wpad-mbedtls`) instead of t
 | `src/daemon.rs` | One receive thread per hue and one for the TUN device, plus the router thread, which also learns neighbors' MAC addresses from frames the router has authenticated |
 | `openwrt/` | The package Makefile, the procd init script and the default UCI config |
 | `scripts/veth-demo.sh` | The four-node demo, with a ping over the mesh |
+| `scripts/cross-build.sh` | Builds the daemon for a router with its OpenWRT SDK's toolchain |
 
 It uses plain threads, with no async runtime, to keep the binary small for routers.
 

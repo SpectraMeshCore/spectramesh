@@ -14,6 +14,7 @@
 use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::{Arc, RwLock};
 
 /// IEEE 802 "Local Experimental Ethertype 1", reserved for experiments like this one.
 //
@@ -41,6 +42,8 @@ pub struct Device {
     pub name: String,
     pub index: i32,
     pub mtu: usize,
+    /// Whether it's administratively up (`ip link set up`).
+    pub up: bool,
 }
 
 impl Device {
@@ -56,6 +59,10 @@ impl Device {
             name: name.into(),
             index: read("ifindex")?.parse().map_err(|_| invalid("ifindex"))?,
             mtu: read("mtu")?.parse().map_err(|_| invalid("MTU"))?,
+            up: read("flags")
+                .ok()
+                .and_then(|flags| u32::from_str_radix(flags.trim_start_matches("0x"), 16).ok())
+                .is_some_and(|flags| flags & libc::IFF_UP as u32 != 0),
         })
     }
 }
@@ -74,45 +81,53 @@ pub fn unwrap(wrapped: &[u8]) -> Option<&[u8]> {
     rest.get(..usize::from(u16::from_be_bytes(*len)))
 }
 
-/// A socket sending and receiving SpectraMesh frames on one device.
+/// A socket sending and receiving SpectraMesh frames on one device, by name:
+/// when the device is deleted and created again, as `wifi up` does to Wi-Fi
+/// interfaces, [`reattach`](Self::reattach) binds a new socket to it.
 pub struct EthernetSocket {
-    fd: OwnedFd,
-    device_index: i32,
+    name: String,
+    bound: RwLock<Bound>,
+}
+
+/// A socket bound to one device's index.
+#[derive(Clone)]
+struct Bound {
+    fd: Arc<OwnedFd>,
+    index: i32,
 }
 
 impl EthernetSocket {
     pub fn open(device: &Device) -> io::Result<Self> {
-        // SOCK_DGRAM: the kernel adds and strips the Ethernet header.
-        // SAFETY: plain syscall; the result is checked before use.
-        let fd = unsafe {
-            libc::socket(
-                libc::AF_PACKET,
-                libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
-                i32::from(ETHERTYPE.to_be()),
-            )
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `fd` is a valid descriptor that nothing else owns.
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-
-        let addr = link_addr(device.index, BROADCAST_MAC);
-        // SAFETY: `addr` is a valid sockaddr_ll and the length matches it.
-        let result = unsafe {
-            libc::bind(
-                fd.as_raw_fd(),
-                (&raw const addr).cast(),
-                mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
-            )
-        };
-        if result < 0 {
-            return Err(io::Error::last_os_error());
-        }
         Ok(EthernetSocket {
-            fd,
-            device_index: device.index,
+            name: device.name.clone(),
+            bound: RwLock::new(Bound {
+                fd: Arc::new(bind(device.index)?),
+                index: device.index,
+            }),
         })
+    }
+
+    /// Looks the device up again. If it's a new device with the same name,
+    /// moves to it and returns true. A device taken down and up again keeps
+    /// its index and needs nothing: its socket works again once it's up.
+    pub fn reattach(&self) -> io::Result<bool> {
+        let device = Device::open(&self.name)?;
+        if device.index == self.bound().index {
+            return Ok(false);
+        }
+        let fd = Arc::new(bind(device.index)?);
+        *self.bound.write().expect("no panics while holding it") = Bound {
+            fd,
+            index: device.index,
+        };
+        Ok(true)
+    }
+
+    fn bound(&self) -> Bound {
+        self.bound
+            .read()
+            .expect("no panics while holding it")
+            .clone()
     }
 
     /// Waits for a frame. Returns the sender's MAC address and the
@@ -122,10 +137,13 @@ impl EthernetSocket {
         // SAFETY: sockaddr_ll is plain data, valid when zeroed.
         let mut addr: libc::sockaddr_ll = unsafe { mem::zeroed() };
         let mut addr_len = mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+        // Hold this socket, not the lock, while waiting: a reattach can
+        // replace it meanwhile.
+        let fd = self.bound().fd;
         // SAFETY: `buf` and `addr` are valid for writes of the lengths given.
         let len = unsafe {
             libc::recvfrom(
-                self.fd.as_raw_fd(),
+                fd.as_raw_fd(),
                 buf.as_mut_ptr().cast(),
                 buf.len(),
                 0,
@@ -148,11 +166,12 @@ impl EthernetSocket {
     /// Sends a SpectraMesh frame to `dst`, which may be [`BROADCAST_MAC`].
     pub fn send(&self, dst: Mac, frame: &[u8]) -> io::Result<()> {
         let wrapped = wrap(frame);
-        let addr = link_addr(self.device_index, dst);
+        let bound = self.bound();
+        let addr = link_addr(bound.index, dst);
         // SAFETY: `wrapped` and `addr` are valid for reads of the lengths given.
         let sent = unsafe {
             libc::sendto(
-                self.fd.as_raw_fd(),
+                bound.fd.as_raw_fd(),
                 wrapped.as_ptr().cast(),
                 wrapped.len(),
                 0,
@@ -165,6 +184,38 @@ impl EthernetSocket {
         }
         Ok(())
     }
+}
+
+/// Opens a packet socket for SpectraMesh frames on the device with `index`.
+fn bind(index: i32) -> io::Result<OwnedFd> {
+    // SOCK_DGRAM: the kernel adds and strips the Ethernet header.
+    // SAFETY: plain syscall; the result is checked before use.
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_PACKET,
+            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+            i32::from(ETHERTYPE.to_be()),
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is a valid descriptor that nothing else owns.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+
+    let addr = link_addr(index, BROADCAST_MAC);
+    // SAFETY: `addr` is a valid sockaddr_ll and the length matches it.
+    let result = unsafe {
+        libc::bind(
+            fd.as_raw_fd(),
+            (&raw const addr).cast(),
+            mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(fd)
 }
 
 fn link_addr(device_index: i32, mac: Mac) -> libc::sockaddr_ll {
